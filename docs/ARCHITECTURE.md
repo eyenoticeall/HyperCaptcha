@@ -2,12 +2,12 @@
 
 HyperCaptcha consists of two cleanly separated subsystems connected by a shared declarative TOML model contract (`schema_version = 1`) and image-free parity fixtures (`tests/fixtures/*.json.gz`):
 
-1. **Rust Localhost Lab & Decision Engine (`src/`, `models/`, `web/`)** — serves local CAPTCHA test pages, verifies tokens with Google reCAPTCHA or hCaptcha, orchestrates parallel multi-view & box-veto requests, and logs structured JSONL records.
-2. **Python Browser Runners (`scripts/`) & Offline Evaluation Toolkit (`eval/`)** — drives Chrome/Camoufox trials against the localhost server, builds deduplicated datasets, serves a local labeling UI, records raw model outputs, fits/sweeps rules, and exports validated TOML configs and parity fixtures.
+1. **Rust Localhost Lab & Decision Engine (`src/`, `models/`, `web/`)** — serves local CAPTCHA test pages (`hypercaptcha serve`, with opt-in `--env-file`), inspects/validates configs offline (`hypercaptcha models`, `hypercaptcha validate-config`), verifies tokens with Google reCAPTCHA or hCaptcha, orchestrates parallel multi-view & box-veto requests, and logs structured JSONL records.
+2. **Python Browser Runners (`scripts/`) & Offline Evaluation Toolkit (`eval/`)** — drives Camoufox trials (`scripts/recaptcha_lab.py`, `scripts/hcaptcha_lab.py`, shared `scripts/_common.py`) against the localhost server, builds deduplicated datasets, serves a local labeling UI, records raw model outputs, fits/sweeps rules, and exports validated TOML configs and parity fixtures.
 
 ```mermaid
 flowchart LR
-    Browser["Chrome / Camoufox (scripts/*_lab.py or manual)"]
+    Browser["Camoufox (scripts/recaptcha_lab.py, scripts/hcaptcha_lab.py, or manual)"]
     Server["Rust Localhost Server (src/server.rs on 127.0.0.1)"]
     Verify["CAPTCHA Verify APIs (reCAPTCHA / hCaptcha)"]
     Pipeline["Decision Pipeline (providers, plan, boxes, pillow, liquid)"]
@@ -31,11 +31,11 @@ flowchart LR
 
 ## 1. Rust HTTP Server Routes & Security Model (`src/server.rs`)
 
-The lab server binds strictly to `127.0.0.1:<port>` (`--port 0` picks an ephemeral port) using `tiny_http`.
+The lab server binds strictly to `127.0.0.1:<port>` (`--port 0` picks an ephemeral port) using `tiny_http`. On startup, `stdout` line 1 is strictly `Open http://<host>:<port>` (parsed by `eval/record.py` and tests), while `stderr` receives a 1-line summary of the active service, mode, model, effort, and log path (zero secrets).
 
 ### Security & Input Boundaries
 
-- **Strict `Host` header check:** Every request must carry `Host: <page_host>:<port>` (`localhost:<port>` for reCAPTCHA; `hypercaptcha.localhost:<port>` or `--hostname <host>:<port>` for hCaptcha). Any mismatch returns HTTP `403`, mitigating DNS rebinding.
+- **Strict `Host` header check:** Every request must carry `Host: <page_host>:<port>` (`localhost:<port>` or `--hostname <host>:<port>` for reCAPTCHA; `hypercaptcha.localhost:<port>` or `--hostname <host>:<port>` for hCaptcha). Any mismatch returns HTTP `403`, mitigating DNS rebinding.
 - **Strict `Origin` header check on mutations:** Every `POST` request must carry `Origin: http://<page_host>:<port>`, blocking cross-origin requests to local API credentials.
 - **Response headers & payload limits:** Every response sets `Cache-Control: no-store` and `X-Content-Type-Options: nosniff`. JSON request bodies are capped at `16 MiB`, base64 replacement tiles at `1 MiB`, `trial_id` to `1–64` ASCII alphanumeric/hyphen chars, `prompt` to `300` bytes, and input PNG dimensions to `280–1568` px per side (validated via PNG signature, IHDR dimensions, and `tiny_skia::Pixmap::decode_png`).
 
@@ -44,7 +44,7 @@ The lab server binds strictly to `127.0.0.1:<port>` (`--port 0` picks an ephemer
 | Method & Route | Purpose | Key Behavior |
 | --- | --- | --- |
 | `GET /`, `/lab.js`, `/lab.css` | Serve local lab UI | Serves embedded files from `web/recaptcha/`, `web/hcaptcha/`, and `web/lab.css`. |
-| `GET /config` | Lab & model capability metadata | Returns CAPTCHA config (`mode`/`captcha`, `site_key`, `test`, `score_based`), provider/model identity (`provider`, `model`, `model_name`), active thresholds, `effort`, `plan_4x4` (`close_ups` serialized as `[null, 506]`), `api_keys` count, and capability flags (`supports_vision`, `requires_vision_check`, `is_decision`). |
+| `GET /config` | Lab & model capability metadata | Returns CAPTCHA config (`mode`/`captcha`, `site_key`, `test`, `score_based`), provider/model identity (`provider`, `model`, `model_name`), active thresholds, `effort` (default `high`), `plan_4x4` (`close_ups` serialized as `[null, 506]`), `api_keys` count, and capability flags (`supports_vision`, `requires_vision_check`, `is_decision`). |
 | `POST /verify` | Verify CAPTCHA token | Calls Google SiteVerify (`v2`/`v3`), Google Cloud reCAPTCHA Enterprise Assessments (`v2-enterprise`/`v3-enterprise`/`policy-challenge`), or `https://api.hcaptcha.com/siteverify`. Validates hostname (allowing hCaptcha's documented `"not-provided"` fallback) and expected action. |
 | `POST /vision-check` | Verify image understanding | Sends synthetic red and blue control images through the active decision provider's dialect and image format; passes iff `P(red \| red) >= 0.7` and `P(red \| blue) <= 0.3`. Cached in a `OnceLock` for the process lifetime. |
 | `POST /model` | Score a grid or telemetry trace | Handles v3 telemetry traces (`trace`) or v2/hCaptcha grids (`layout`, `prompt`, `image`). Optionally composites fetched reCAPTCHA replacement tiles (`tiles`) or segments hCaptcha canvas screenshots (`pictures`), runs `/vision-check` automatically for decision providers, executes the decision pipeline, and returns picks, probabilities, `vllm_components`/`jev_components`, `provider_meta`, `usage`, and (when drawn/composed) `grid_png` and `pictures`. |
@@ -55,11 +55,11 @@ The lab server binds strictly to `127.0.0.1:<port>` (`--port 0` picks an ephemer
 
 Every `POST` endpoint appends a single JSON line to `--log <path>` (or `io::sink()` when omitted) under a unified envelope:
 
-- **Common fields:** `trial_id`, `source` (`browser` | `camoufox` | `chrome`), `event` (`google` | `hcaptcha` | `model` | `vision_check` | `pictures` | `observation`), `timestamp_ms`, optional `latency_ms`, service tags (`mode` + `google_test_key` for reCAPTCHA; `captcha: "hcaptcha"` + `hcaptcha_test_key` for hCaptcha), model metadata (`requested_model`, `model_name`, `provider`, `tile_threshold` on `model`/`vision_check` events), and event-specific `result`.
+- **Common fields:** `trial_id`, `source` (`browser` | `camoufox` | `chrome`; both Camoufox runners send `camoufox`, while `chrome` remains accepted for compatibility), `event` (`google` | `hcaptcha` | `model` | `vision_check` | `pictures` | `observation`), `timestamp_ms`, optional `latency_ms`, service tags (`mode` + `google_test_key` for reCAPTCHA; `captcha: "hcaptcha"` + `hcaptcha_test_key` for hCaptcha), model metadata (`requested_model`, `model_name`, `provider`, `tile_threshold` on `model`/`vision_check` events), and event-specific `result`.
 - **Log privacy invariant:** `grid_png` is attached to the HTTP response only **after** logging; screenshots, raw telemetry payloads, CAPTCHA tokens, and API keys are never written to server JSONL logs.
-- **Browser runner logs (`scripts/chrome_lab.py`, `scripts/hcaptcha_lab.py`):** Both write `trials.jsonl` (top-level `trial_id`, `outcome`, `rounds`, `browser`, `browser_version`, optional `model_name`, optional `vision_check_id`, and `checkbox_to_verification_ms`) and `vision-checks.jsonl` under `--output`:
-  - `scripts/chrome_lab.py` records `mode`, optional `google`/`widget_message`/`tile_network` (`--log-tile-network`), calls `POST /observe`, and writes per-round `prompt`, `layout` (`3` or `4`), `image`, `image_sha256`, `timeline_ms`, and optional `model`, `stage`, `rejection`, `judged`, `reloaded`, `hints`, `early`, `early_not_used`, and `replaced_tile_ids`.
-  - `scripts/hcaptcha_lab.py` records `captcha: "hcaptcha"`, `passed_over` (refreshed non-grid tasks with `prompt`, `image`, `settled`, `ms`), optional `hcaptcha`/`checkbox_to_challenge_ms`/`stages`/`rejections`, does not call `POST /observe`, and writes per-round `prompt`, `layout` (`3`), `image` (`grid-NN.png` or `task-NN.png`), `page`, `pages`, `examples`, `settled`, `pictures`, `shown_ms`, and (when submitting) `model_ms`, `model`, `picks`, `label_before_submit`, `answered_ms`, and `result`.
+- **Camoufox browser runner logs (`scripts/recaptcha_lab.py`, `scripts/hcaptcha_lab.py`, shared `scripts/_common.py`):** Both runners write `trials.jsonl` (top-level `trial_id`, `outcome`, `rounds`, `browser` [`"camoufox"`], `browser_version`, optional `model_name`, optional `vision_check_id`, and `checkbox_to_verification_ms`) and `vision-checks.jsonl` under `--output`:
+  - `scripts/recaptcha_lab.py` (default `--output reports/recaptcha`; also supports `--interactive`, `--smoke`, `--score`, `--headed`) records `mode`, optional `google`/`widget_message`, calls `POST /observe`, and writes per-round `prompt`, `layout` (`3` or `4`), `image`, `image_sha256`, `timeline_ms`, and optional `model`, `stage`, `rejection`, `judged`, `reloaded`, `early`, `early_not_used`, and `replaced_tile_ids`.
+  - `scripts/hcaptcha_lab.py` (default `--output reports/hcaptcha`; also supports `--interactive`, `--smoke`, `--headed`) records `captcha: "hcaptcha"`, `passed_over` (refreshed non-grid tasks with `prompt`, `image`, `settled`, `ms`), optional `hcaptcha`/`checkbox_to_challenge_ms`/`stages`/`rejections`, does not call `POST /observe`, and writes per-round `prompt`, `layout` (`3`), `image` (`grid-NN.png` or `task-NN.png`), `page`, `pages`, `examples`, `settled`, `pictures`, `shown_ms`, and (when submitting) `model_ms`, `model`, `picks`, `label_before_submit`, `answered_ms`, and `result`.
 
 ---
 
@@ -71,7 +71,7 @@ Every `POST` endpoint appends a single JSON line to `--log <path>` (or `io::sink
   - `dialect` (`systemone-assets` vs. `systemone-images`)
   - `base_url`, `api_key_envs`, `extra_api_keys_env`, `extra_headers`
   - `image_format`, `crop_filter`, `gzip`, `max_images`, `multi_state_windows`, `supports_every_box`, `return_meta`, `hedge_on_stall`, `warm_connections`, `min_patch_tokens`
-- **`Plan` (`src/plan.rs`):** Owned, deserializable struct describing a 4×4 round (`close_ups: Vec<Option<u32>>`, `select_from`, `skip_below`, `boxes: Option<BoxRule>`, `gap: Option<GapRule>`; `--record` constructs `Plan::record(wire.supports_every_box)`). `close_ups` accepts `"capture"` (`None`) or a positive pixel length (`Some(px)`) in TOML and serializes as `[null, 506]` in `GET /config` JSON.
+- **`Plan` (`src/plan.rs`):** Owned, deserializable struct describing a 4×4 round (`close_ups: Vec<Option<u32>>`, `select_from`, `skip_below`, `boxes: Option<BoxRule>`, `gap: Option<GapRule>`; `--effort` defaults to `high` across `low`/`medium`/`high`/`max`, and `--record` constructs `Plan::record(wire.supports_every_box)`). `close_ups` accepts `"capture"` (`None`) or a positive pixel length (`Some(px)`) in TOML and serializes as `[null, 506]` in `GET /config` JSON.
 
 ---
 
@@ -148,15 +148,15 @@ hCaptcha draws all 9 pictures onto a single HTML `<canvas>` with slight per-tile
 
 ## 7. Offline Evaluation Toolkit (`eval/`)
 
-Packaged in `pyproject.toml` as `hypercaptcha-eval` (`requires-python >= 3.11`, base deps `numpy` + `httpx`, optional extras `browser`, `camoufox`, `dev`) and invoked via `hypercaptcha-eval <subcommand>` or `python -m eval <subcommand>`:
+Packaged in `pyproject.toml` as `hypercaptcha-eval` (`requires-python >= 3.11`, base deps `numpy` + `httpx`, optional extras `browser` [`camoufox==0.5.9`] and `dev`) and invoked via `hypercaptcha-eval <subcommand>` or `python -m eval <subcommand>`:
 
 | Module | Subcommand | Responsibility |
 | --- | --- | --- |
 | `eval/schema.py` | *(library)* | Exact NumPy implementation of Rust's `clip_prob`, `log_odds`, `sigmoid`, 4-neighbor max, box cover/inside geometry, and `decide_4x4`. Verified to reproduce `5,288/5,288` exact tile picks across all 3 committed `.json.gz` fixtures. |
-| `eval/dataset.py` | `dataset` | Scans `chrome_lab.py` / `hcaptcha_lab.py` runs, deduplicates grids by image SHA-256, and preserves `trial_id` as `group_id` for leak-free grouped CV. |
+| `eval/dataset.py` | `dataset` | Scans `recaptcha_lab.py` / `hcaptcha_lab.py` runs (accepting `--service` or `--captcha`), deduplicates grids by image SHA-256, and preserves `trial_id` as `group_id` for leak-free grouped CV. |
 | `eval/label_server.py` + `eval/label_ui.html` | `label` | Zero-external-dependency `127.0.0.1` HTTP server and browser UI (`GET /api/items`, `GET /api/image/<id>`, `GET /api/labels`, `POST /api/labels`) with 3-state marking (`target`/`sliver`/`empty`), `unclear`, and `--repeat-check` inter-rater agreement metrics. |
-| `eval/record.py` | `record` | Spawns `hypercaptcha serve ... --record` (or attaches to loopback `--server-url`), runs multi-pass concurrent recording with retry/resume, strips `grid_png`, and never auto-reads `.env*`. |
+| `eval/record.py` | `record` | Auto-discovers `target/release/hypercaptcha` and spawns `hypercaptcha serve ... --record` (or attaches to loopback `--server-url`), accepts `--service` or `--captcha`, runs multi-pass concurrent recording with retry/resume and concise progress updates on `stderr`, strips `grid_png`, and never auto-reads `.env*`. |
 | `eval/fit.py` | `fit` | Standardized ridge logistic regression for 3×3 and 4×4 grids with deterministic grouped K-fold CV and single-view baselines. |
 | `eval/sweep.py` | `sweep` | Vectorized NumPy sweep across close-up passes, cutoffs, skip gates, gap rules, and box asks (`whole_grid`, `every`, `windows`) with grouped CV, cross-pass stability/flip rates, plateau-center selection, and paired grouped bootstrap 95% CIs. |
-| `eval/export.py` | `export` | Emits and `tomllib`-validates `schema_version = 1` TOML `ModelConfig` files and deterministic (`mtime = 0`), image-free/label-free `.json.gz` parity fixtures. |
+| `eval/export.py` | `export` | Emits and `tomllib`-validates `schema_version = 1` TOML `ModelConfig` files (supporting `--base-config <path.toml>` inheritance and `--service`/`--captcha`) and deterministic (`mtime = 0`), image-free/label-free `.json.gz` parity fixtures. |
 | `eval/summarize.py` | `summarize` | Aggregates live `trials.jsonl` runs into Markdown/JSON reports with Wilson 95% CIs, challenge-type splits, rejection counts, timeline medians/p90s, and token totals. |

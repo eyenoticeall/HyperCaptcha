@@ -2,7 +2,7 @@
 
 HyperCaptcha separates **model configuration** from **Rust harness code**. Every built-in model lives in a declarative TOML file (`schema_version = 1`) under `models/`, and any new or custom decision-model API can be evaluated, recorded, fitted, swept, and loaded via `--model-config <path>` without touching Rust.
 
-Built-in configurations:
+Built-in configurations (inspect all of them offline with `cargo run --locked -- models [--service <recaptcha|hcaptcha>] [--json]`):
 
 - `models/recaptcha/vllm/d3-ultra.toml` (`vLLM/d3-ultra`)
 - `models/recaptcha/liquid/d1.2-ultra.toml` (`Liquid/d1.2-ultra`)
@@ -37,35 +37,29 @@ LIQUID_API_KEY=... cargo run --release --locked -- serve \
 
 ### 2. Record Full Unpruned Outputs for Offline Fitting (`--record`)
 
-`--record` (backward-compatible alias `--record-4x4`) queries every signal any effort tier can use — whole grid, both close-up passes (`capture` and `506` px), skip presence question, and every supported box request (`whole`, `windows`, and `every` if supported) — waits for all replies, logs them all, and leaves the answer unmodified by rules. On 3×3 grids it records standard two-view scores using equal averaging:
+`--record` queries every signal any effort tier can use — whole grid, both close-up passes (`capture` and `506` px), skip presence question, and every supported box request (`whole`, `windows`, and `every` if supported) — waits for all replies, logs them all, and leaves the answer unmodified by rules. On 3×3 grids it records standard two-view scores using equal averaging:
 
 ```sh
 LIQUID_API_KEY=... cargo run --release --locked -- serve \
-  --mode v2 --google-test-key \
+  --google-test-key \
   --provider liquid \
   --model d1.3-preview \
   --record
 ```
 
-On **hCaptcha** (`--captcha hcaptcha`), `vllm`, `liquid`, `custom`, and `jev` (with `--jev-vision average`, `--record`, or `--model-config`) are all supported.
+On **hCaptcha** (`--captcha hcaptcha` or `--service hcaptcha`), `vllm`, `liquid`, `custom`, and `jev` (with `--jev-vision average`, `--record`, or `--model-config`) are all supported.
 
-### Provider-Agnostic CLI Flags & Aliases
+### Provider-Agnostic CLI Flags
 
-| Preferred Flag | Backward-Compatible Alias | Purpose |
-| --- | --- | --- |
-| `--decision-rule <average\|logistic>` | `--vllm-decision` | Choose weighted averaging vs. fitted logistic rule |
-| `--whole-grid-weight-3x3 <0..1>` | `--vllm-whole-grid-weight-3x3` | Whole-grid weight on 3×3 (implies `average`) |
-| `--whole-grid-weight-4x4 <0..1>` | `--vllm-whole-grid-weight-4x4` | Whole-grid weight on 4×4 (implies `average`) |
-| `--box-wait` | `--vllm-box-wait` | Wait for and log all box replies instead of early-returning |
-| `--close-ups-per-request <2..=9>` | `--vllm-close-ups-per-request` | Max tile crops per close-up request (default `4`) |
-| `--cold-connections` | `--vllm-cold-connections` | Disable startup connection warming and idle keep-warm pings |
-| `--record` | `--record-4x4` | Record all scoring passes, skip check, and supported box asks |
+All decision providers share the same flags on `hypercaptcha serve`: `--effort <low|medium|high|max>` (default `high`), `--decision-rule <average|logistic>`, `--whole-grid-weight-3x3 <0..1>`, `--whole-grid-weight-4x4 <0..1>`, `--box-wait`, `--close-ups-per-request <2..=9>` (default `4`), `--cold-connections`, and `--record`. Both `--service` and `--captcha` are accepted interchangeably across `hypercaptcha serve`, `hypercaptcha models`, and `hypercaptcha-eval` (`dataset`, `record`, `export`).
+
+> **Backward compatibility:** Legacy `--vllm-*` flags and `--record-4x4` are hidden from `--help` but still parse silently.
 
 ---
 
 ## Option B: Add a Custom Decision-Model API via TOML (`--model-config`)
 
-If you host or call a System One–compatible decision model on another endpoint, copy [`models/examples/custom-decision-model.toml`](../models/examples/custom-decision-model.toml) and load it with `--model-config`:
+If you host or call a System One–compatible decision model on another endpoint, copy [`models/examples/custom-decision-model.toml`](../models/examples/custom-decision-model.toml), validate it offline, and load it with `--model-config`:
 
 ```toml
 schema_version = 1
@@ -103,9 +97,11 @@ select_from = 0.5
 # skip_below = 0.7
 ```
 
-Run it directly (CLI flags such as `--base-url`, `--effort`, `--decision-rule`, `--tile-threshold`, `--cold-connections`, and `--record` still override the TOML where applicable):
+Validate the TOML offline (no API keys required), then run it directly (CLI flags such as `--base-url`, `--effort` [default `high`], `--decision-rule`, `--tile-threshold`, `--cold-connections`, `--env-file`, and `--record` still override the TOML where applicable):
 
 ```sh
+cargo run --locked -- validate-config models/examples/custom-decision-model.toml
+
 MY_DECISION_API_KEY=... cargo run --release --locked -- serve \
   --mode v2-enterprise \
   --model-config models/examples/custom-decision-model.toml \
@@ -141,9 +137,9 @@ MY_DECISION_API_KEY=... cargo run --release --locked -- serve \
 
 ### Validation Rules Enforced by Rust
 
-When loading any built-in or external TOML config, `src/captcha/mod.rs` strictly validates:
+When loading any built-in or external TOML config (or running `cargo run --locked -- validate-config <PATH>...` offline without API keys), `src/captcha/mod.rs` strictly validates:
 - `schema_version == 1` and unknown keys are rejected (`#[serde(deny_unknown_fields)]`).
-- `service` matches `--captcha` (`recaptcha` or `hcaptcha`), and `provider` is a decision provider (`vllm`, `liquid`, `jev`, `custom`).
+- `service` matches `--captcha` / `--service` (`recaptcha` or `hcaptcha`), and `provider` is a decision provider (`vllm`, `liquid`, `jev`, `custom`).
 - For `provider = "custom"`, `[endpoint]` must supply `dialect`, `base_url`, and `api_key_env`.
 - `base_url` is a valid HTTP/HTTPS URL, all `extra_headers` have valid HTTP header names/values, and `max_images >= 1` (`>= 2` when `dialect = "systemone-images"`).
 - All weights are finite, all probability cutoffs/thresholds (`cutoff`, `select_from`, `skip_below`, `gap.*`, `boxes.*`) lie in `0.0..=1.0`, `close_ups` is non-empty with positive pixel sizes (or `"capture"`), and `boxes.every` is only allowed when `supports_every_box = true`.
@@ -152,11 +148,11 @@ When loading any built-in or external TOML config, `src/captcha/mod.rs` strictly
 
 ## Full Offline Tuning & Parity-Fixture Loop (`hypercaptcha-eval`)
 
-Use the standalone Python toolkit (`hypercaptcha-eval`, also runnable as `python -m eval`) to go from raw captured lab runs to a tuned TOML config and a deterministic Rust parity test.
+Use the standalone Python toolkit (`hypercaptcha-eval`, also runnable as `python -m eval`) to go from raw captured lab runs to a tuned TOML config and a deterministic Rust parity test. `--service` and `--captcha` are accepted interchangeably on `dataset`, `record`, and `export`.
 
 ### Step 1: Build a Deduplicated Dataset Manifest (`dataset`)
 
-Scan one or more `chrome_lab.py` or `hcaptcha_lab.py` run directories. Grids are deduplicated by image SHA-256 and grouped by `trial_id` (`group_id`) so grids from the same challenge never leak across cross-validation folds:
+Scan one or more `recaptcha_lab.py` or `hcaptcha_lab.py` run directories. Grids are deduplicated by image SHA-256 and grouped by `trial_id` (`group_id`) so grids from the same challenge never leak across cross-validation folds:
 
 ```sh
 uv run hypercaptcha-eval dataset reports/capture-run-1 reports/capture-run-2 \
@@ -185,7 +181,7 @@ uv run hypercaptcha-eval label \
 
 ### Step 3: Record Raw Model Outputs (`record`)
 
-Build the Rust release binary, then record all views, skip probabilities, and box replies across your dataset. Use `--passes 1` for deterministic models and `--passes 3` for stochastic models (like Liquid or Jev). Output is resumable per `(grid_id, pass_index)` pair and strips `grid_png` automatically:
+Build the Rust release binary, then record all views, skip probabilities, and box replies across your dataset. `record` auto-discovers `target/release/hypercaptcha` (pass `--binary` only to override), accepts `--service` or `--captcha`, and prints concise progress updates to `stderr` without polluting JSONL or stdout. Use `--passes 1` for deterministic models and `--passes 3` for stochastic models (like Liquid or Jev). Output is resumable per `(grid_id, pass_index)` pair and strips `grid_png` automatically:
 
 ```sh
 cargo build --release --locked
@@ -193,8 +189,7 @@ cargo build --release --locked
 MY_DECISION_API_KEY=... uv run hypercaptcha-eval record \
   --dataset datasets/recaptcha_4x4/dataset.jsonl \
   -o recordings/my-model-4x4.jsonl \
-  --binary target/release/hypercaptcha \
-  --captcha recaptcha \
+  --service recaptcha \
   --model-config models/examples/custom-decision-model.toml \
   --passes 3 --workers 2 --retries 5
 ```
@@ -220,7 +215,7 @@ Add `--slivers-empty` to check sensitivity when optional slivers are treated as 
 
 ### Step 5: Sweep 4×4 Effort Tiers (`sweep`)
 
-Runs a vectorized NumPy parameter sweep over close-up pass modes, cutoffs, skip thresholds, gap rules, and every recorded box ask (`whole_grid`, `every`, `windows`). Reports in-sample accuracy, grouped K-fold OOF accuracy, cross-pass stability and pass-to-pass flip rates (when `--passes >= 2`), token/request estimates, and paired grouped bootstrap 95% confidence intervals, selecting plateau centers for `low`, `medium`, `high`, and `max`:
+Runs a vectorized NumPy parameter sweep over close-up pass modes, cutoffs, skip thresholds, gap rules, and every recorded box ask (`whole_grid`, `every`, `windows`). Reports in-sample accuracy, grouped K-fold OOF accuracy, cross-pass stability and pass-to-pass flip rates (when `--passes >= 2`), token/request estimates, and paired grouped bootstrap 95% confidence intervals, selecting plateau centers for `low`, `medium`, `high` *(default)*, and `max`:
 
 ```sh
 uv run hypercaptcha-eval sweep \
@@ -237,24 +232,12 @@ Useful options: `--weights w0,w1,w2,w3,b` to hold weights fixed, `--fast` for a 
 
 ### Step 6: Export Validated TOML & Parity Fixture (`export`)
 
-Generates a `tomllib`-validated `schema_version = 1` TOML config and (optionally) a deterministic (`mtime = 0`), **image-free and label-free** `.json.gz` parity fixture matching the exact format of `tests/fixtures/*.json.gz`:
+Generates a `tomllib`-validated `schema_version = 1` TOML config and (optionally) a deterministic (`mtime = 0`), **image-free and label-free** `.json.gz` parity fixture matching the exact format of `tests/fixtures/*.json.gz`. Pass `--base-config <path.toml>` to inherit `service`, `name`, `provider`, `model_id`, and `[endpoint]` from your starter config (explicit CLI flags such as `--name`, `--model-id`, `--service`/`--captcha`, or `[endpoint]` options still override inherited values):
 
 ```sh
 uv run hypercaptcha-eval export \
-  --service recaptcha \
-  --name "MyProvider/my-decision-model" \
-  --provider custom \
-  --model-id "my-decision-model-v1" \
+  --base-config models/examples/custom-decision-model.toml \
   --default-decision logistic \
-  --dialect systemone-assets \
-  --base-url "https://api.example.com/v1" \
-  --api-key-env MY_DECISION_API_KEY \
-  --image-format jpeg \
-  --crop-filter bilinear \
-  --max-images 16 \
-  --multi-state-windows \
-  --no-supports-every-box \
-  --no-gzip \
   --sweep recordings/sweep_4x4.json \
   --fit recordings/fit_4x4.json \
   -o models/recaptcha/myprovider/my-decision-model.toml \
@@ -264,15 +247,18 @@ uv run hypercaptcha-eval export \
   --pass-index 0
 ```
 
+Without `--base-config`, specify `--service` (or `--captcha`), `--name`, `--provider`, `--model-id`, and (for `provider = "custom"`) `--dialect`, `--base-url`, `--api-key-env`, plus any optional `[endpoint]` flags directly on the CLI.
+
 ### Step 7: Verify in Rust & Python
 
-Test loading the exported TOML immediately with `--model-config`:
+Validate the exported TOML offline first, then test loading it with `--model-config` (`--effort` defaults to `high`):
 
 ```sh
+cargo run --locked -- validate-config models/recaptcha/myprovider/my-decision-model.toml
+
 MY_DECISION_API_KEY=... cargo run --release --locked -- serve \
-  --mode v2 --google-test-key \
-  --model-config models/recaptcha/myprovider/my-decision-model.toml \
-  --effort high
+  --google-test-key \
+  --model-config models/recaptcha/myprovider/my-decision-model.toml
 ```
 
 If contributing a new built-in model to HyperCaptcha:
@@ -284,12 +270,14 @@ If contributing a new built-in model to HyperCaptcha:
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 cargo test --locked
+cargo run --locked -- models
+cargo run --locked -- validate-config models/recaptcha/*/*.toml models/hcaptcha/*/*.toml models/examples/custom-decision-model.toml
 uv run --extra dev pytest -v
 ```
 
 ### Step 8: Summarize Live Trials (`summarize`)
 
-After running live trials with `scripts/chrome_lab.py` or `scripts/hcaptcha_lab.py`, compute Wilson 95% confidence intervals, layout/challenge breakdowns, timelines, and token usage:
+After running live trials with `scripts/recaptcha_lab.py` or `scripts/hcaptcha_lab.py`, compute Wilson 95% confidence intervals, layout/challenge breakdowns, timelines, and token usage:
 
 ```sh
 uv run hypercaptcha-eval summarize reports/my-model-live/trials.jsonl \

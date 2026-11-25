@@ -1,6 +1,6 @@
 # Live reCAPTCHA benchmark and failure review
 
-> **Historical benchmark note:** This report preserves the original November 15, 2026 50-attempt live comparison of `typesafe/Jev` and `vLLM/d3-ultra` using equal-weight 50/50 multi-view averaging. For all subsequent multi-model evaluations (`vLLM/d3-ultra`, `Liquid/d1.2-ultra`, `Liquid/d1.2`, `typesafe/Jev`), logistic and box-veto effort ladders, later live runs, and hCaptcha status, see [docs/RESULTS.md](docs/RESULTS.md).
+> **Historical benchmark note:** This report preserves the original November 15, 2026 50-attempt live comparison of `typesafe/Jev` and `vLLM/d3-ultra` using equal-weight 50/50 multi-view averaging. For all subsequent multi-model evaluations (`vLLM/d3-ultra`, `Liquid/d1.2-ultra`, `Liquid/d1.2`, `typesafe/Jev`), logistic and box-veto effort ladders, later live runs, and hCaptcha status, see [docs/RESULTS.md](RESULTS.md).
 
 **Run date** November 15, 2026, 04:01–04:17 Singapore time
 
@@ -8,7 +8,7 @@
 
 HyperCaptcha is a Rust research harness for measuring how modern vision and decision models perform against Google reCAPTCHA in a controlled lab. It supports testing live widgets on researcher-controlled localhost keys alongside replaying saved puzzles. Live runs measure whether Google verifies the interaction. Saved grids let us compare model inputs on the same image and investigate individual tile decisions.
 
-The broader project covers checkbox and score-based integrations, including Enterprise and non-Enterprise variants. This run compares Jev with d3-ultra on image challenges from a live **reCAPTCHA v2 Enterprise checkbox key** in Camoufox. An earlier JPEG pilot verified 7 of 7 image attempts for Jev and 8 of 8 for d3-ultra, with three additional checkbox-only passes across the two models. The pilot included two 4×4 image attempts, both for d3-ultra. The larger run estimates pass rates separately by grid size. [Harness overview](README.md) · Local pilot trial log: `reports/decision-jpeg-comparison/live.jsonl` *(gitignored)*
+The broader project covers checkbox and score-based integrations, including Enterprise and non-Enterprise variants. This run compares Jev with d3-ultra on image challenges from a live **reCAPTCHA v2 Enterprise checkbox key** in Camoufox. An earlier JPEG pilot verified 7 of 7 image attempts for Jev and 8 of 8 for d3-ultra, with three additional checkbox-only passes across the two models. The pilot included two 4×4 image attempts, both for d3-ultra. The larger run estimates pass rates separately by grid size. [Harness overview](../README.md) · Local pilot trial log: `reports/decision-jpeg-comparison/live.jsonl` *(gitignored)*
 
 ## Method
 
@@ -17,7 +17,7 @@ The broader project covers checkbox and score-based integrations, including Ente
 - For 3×3, the harness sent two parallel requests, one for the whole grid and one for the nine individual photos. For 4×4, it sent three parallel requests, one for the whole grid and two batches of eight crops. Each 4×4 crop batch also received the whole scene. The harness averaged the two view scores per tile with equal weight and selected scores at or above 60% on 3×3 and 50% on 4×4.
 - Counted a pass when Google returned an assessment that the lab validated for `localhost`. A visible widget rejection or the six-round limit ended the attempt as a failure. Subgroup rates use the first grid in each attempt. Model-round timings use the layout of each individual round.
 
-[Browser runner](scripts/chrome_lab.py) · [Provider pipeline](src/providers.rs) · Local comparison runner: `reports/decision-live-50/run.py` *(gitignored)*
+[Browser runner](../scripts/recaptcha_lab.py) · [Provider pipeline](../src/providers.rs) · Local comparison runner: `reports/decision-live-50/run.py` *(gitignored)*
 
 ## Benchmark findings
 

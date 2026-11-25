@@ -118,8 +118,8 @@ Input tokens are for one 4×4 round with the skip question (`~300` fewer without
 | **`vLLM/d3-ultra`** *(pre-level ref)* | — | 12 | 16,755 | 271 (79.9%) | 245 (78.8%) | 2 passes, cutoff `0.50`, either box `≥ 0.3`, exempt `95.3%` |
 | **`vLLM/d3-ultra`** | `low` | 6 | 6,475 | **243 (71.7%)** | **233 (74.9%)** | 1 pass (`506` px), cutoff `0.55`, skip `< 0.7`, gap rule (under `0.60`, crop−whole `> 0.30`) |
 | **`vLLM/d3-ultra`** | `medium` | 7 | 7,915 | **274 (80.8%)** | **250 (80.4%)** | 1 pass (`506` px), cutoff `0.55`, skip `< 0.7`, 9 whole boxes `≥ 0.3`, cover `≥ 1%`, exempt `95.3%` |
-| **`vLLM/d3-ultra`** | `high` | 11 | 12,351 | **281 (82.9%)** | **257 (82.6%)** | 2 passes (`capture`+`506`), cutoff `0.50`, skip `< 0.7`, 9 whole boxes `≥ 0.3`, cover `≥ 1%`, inside `≥ 1%`, exempt `95.3%` |
-| **`vLLM/d3-ultra`** *(default)* | `max` | 12 | 16,755 | **282 (83.2%)** | **258 (83.0%)** | 2 passes (`capture`+`506`), cutoff `0.50`, skip `< 0.7`, **both** whole `≥ 0.02` AND windows `≥ 0.5`, cover `≥ 1%`, exempt `95.3%` |
+| **`vLLM/d3-ultra`** *(default)* | `high` | 11 | 12,351 | **281 (82.9%)** | **257 (82.6%)** | 2 passes (`capture`+`506`), cutoff `0.50`, skip `< 0.7`, 9 whole boxes `≥ 0.3`, cover `≥ 1%`, inside `≥ 1%`, exempt `95.3%` |
+| **`vLLM/d3-ultra`** | `max` | 12 | 16,755 | **282 (83.2%)** | **258 (83.0%)** | 2 passes (`capture`+`506`), cutoff `0.50`, skip `< 0.7`, **both** whole `≥ 0.02` AND windows `≥ 0.5`, cover `≥ 1%`, exempt `95.3%` |
 | **`Liquid/d1.2-ultra`** | `low` | 6 | 7,299 | **232.0 (68.4%)** | **218.3 (70.2%)** | 1 pass (`506` px), cutoff `0.40`, skip `< 0.5`, no boxes |
 | **`Liquid/d1.2-ultra`** | `medium` | 7 | 8,668 | **242.0 (71.4%)** | **223.7 (71.9%)** | `low` + 1 `boxes` req `≥ 0.3`, cover `≥ 1%`, exempt `90%` |
 | **`Liquid/d1.2-ultra`** | `high` / `max` | 11 | 14,051 | **245.0 (72.3%)** | **225.7 (72.6%)** | 2 passes (`capture`+`506`), cutoff `0.35`, skip `< 0.5`, `boxes` `≥ 0.3`, cover `≥ 1%`, exempt `90%` |
@@ -140,7 +140,7 @@ Derived from request timestamps logged during a `333`-grid offline replay (not t
 | `max` | 556 ms | 598 ms | **194** (median +285 ms) | 2,516 ms (51 wait; +65 ms vs. `high`) |
 | Pre-level either-request *(ref)* | 289 ms | — | 52 | — |
 
-Because `max` requires both box requests to confirm any pick under `95.26%`, `194` of `333` rounds wait for the slowest request (the `16`-window box call, `~0.5 s` compute vs. `~0.26 s` for close-up batches). `--effort high` stays within `1` grid of `max` (`281` vs. `282`) while saving `4,404` tokens and avoiding window-box wait time.
+Because `max` requires both box requests to confirm any pick under `95.26%`, `194` of `333` rounds wait for the slowest request (the `16`-window box call, `~0.5 s` compute vs. `~0.26 s` for close-up batches). `--effort high` (the default) stays within `1` grid of `max` (`281` vs. `282`) while saving `4,404` tokens and avoiding window-box wait time.
 
 ### C. Liquid Model Findings, Non-Determinism & Single `boxes` Question
 
@@ -197,7 +197,7 @@ Several seemingly intuitive improvements failed offline validation and were inte
 
 ### A. 50-Attempt Live `Jev` vs. `d3-ultra` (2026-11-15)
 
-Headless Camoufox `158.0.1-beta.41`, live localhost reCAPTCHA v2 Enterprise checkbox key, JPEG q90, equal-weight `50/50` averaging (`60%` 3×3 / `50%` 4×4), `6`-round cap; `100/100` attempts opened an image challenge (`145` grids: `67` Jev, `78` `d3-ultra`). An earlier JPEG pilot passed `7/7` Jev and `8/8` `d3-ultra` (+`3` checkbox-only). Full per-attempt failure notes are preserved in [BENCHMARK_REPORT.md](../BENCHMARK_REPORT.md).
+Headless Camoufox `158.0.1-beta.41`, live localhost reCAPTCHA v2 Enterprise checkbox key, JPEG q90, equal-weight `50/50` averaging (`60%` 3×3 / `50%` 4×4), `6`-round cap; `100/100` attempts opened an image challenge (`145` grids: `67` Jev, `78` `d3-ultra`). An earlier JPEG pilot passed `7/7` Jev and `8/8` `d3-ultra` (+`3` checkbox-only). Full per-attempt failure notes are preserved in [BENCHMARK_REPORT_2026-11-15.md](BENCHMARK_REPORT_2026-11-15.md).
 
 | Metric | `typesafe/Jev` (`jev-1.14.0`) | `vLLM/d3-ultra` |
 | --- | ---: | ---: |
@@ -219,7 +219,7 @@ Headless Camoufox `158.0.1-beta.41`, live localhost reCAPTCHA v2 Enterprise chec
 
 - **Overall:** `28` passed on checkbox alone (`24/40` in the first 40 attempts, `0/120` in the last 120), `3` never displayed a grid, **`169` challenged → `160` eventually solved (94.7%)** (`104` on the first answer), `7` hit the stage limit (all inside 4×4 skip sequences), and `2` ended on a runner error/timeout.
 - **Latency:** Median click → verification **`2.7 s`**, p90 **`> 34.8 s`**. All `43` solves taking `≥ 20 s` included dynamic 3×3 rounds; all `112` non-dynamic solves completed in **`≤ 6.2 s`**.
-- **Stage-counting note:** During this run, `--max-stages` counted each submitted grid (so two 5-grid skip sequences consumed all `10`). Current `scripts/chrome_lab.py` counts Google verdicts instead, which has not yet been re-measured live.
+- **Stage-counting note:** During this run, `--max-stages` counted each submitted grid (so two 5-grid skip sequences consumed all `10`). Current `scripts/recaptcha_lab.py` counts Google verdicts instead, which has not yet been re-measured live.
 
 | First Challenge Shown | Challenged | Eventually Solved | First-Answer Pass | Median Time to Pass |
 | --- | ---: | ---: | ---: | ---: |
@@ -235,7 +235,7 @@ Headless Camoufox `158.0.1-beta.41`, live localhost reCAPTCHA v2 Enterprise chec
 
 - **72% human-right vs. 26% Google-accepted gap:** Across `824` live attempts, dynamic 3×3 challenges solved **`34/131` (26.0%)**, with almost every rejection returning generic `"Please try again"`. Blind human review of `36` dynamic challenges (`24` rejected + `12` solved, `123` rounds total) found that `d3-ultra` answered **every round correctly** in **`17/24` (70.8%)** of rejected challenges and **`9/12` (75.0%)** of solved challenges — a weighted **`~72%`** human-verified accuracy vs. **`26%`** Google acceptance (`166` targets picked, `5` missed, `6` wrong across `123` rounds). Tile accuracy is not the bottleneck on dynamic 3×3.
 - **Server-controlled tile reveal timer:** After a tile click, the widget fetches the replacement image immediately (median **`23 ms`** after the last click across `56` logged tiles), then waits `1,000 ms + server_value` before displaying and enabling it. Across `225` logged waits, **`9`** fell in a `~1.04 s` band and **`216`** in a `~4.1 s` band (`72/73` multi-wait attempts remained in one band). Among passed attempts, **`37/45`** slow-tile passes carried `TOO_MUCH_TRAFFIC` in Google's reasons, compared to **`0/3`** fast-tile passes, **`0/112`** non-dynamic passes, and **`0/28`** checkbox passes. HyperCaptcha does not modify this timer.
-- **Early-tile compositing (on by default in `scripts/chrome_lab.py`; disable with `--no-early-tiles`):** While the widget waits to reveal fetched replacement tiles, the runner sends them to `/model` (`tiles` field) so the server composites them onto the previous screenshot and queries the model ahead of reveal. It falls back to a fresh screenshot if a tile lands in an unexpected cell, fails to load, or leaves any tile score within **`0.25`** of the cutoff.
+- **Early-tile compositing (on by default in `scripts/recaptcha_lab.py`; disable with `--no-early-tiles`):** While the widget waits to reveal fetched replacement tiles, the runner sends them to `/model` (`tiles` field) so the server composites them onto the previous screenshot and queries the model ahead of reveal. It falls back to a fresh screenshot if a tile lands in an unexpected cell, fails to load, or leaves any tile score within **`0.25`** of the cutoff.
   - *Offline (`59` rounds):* Server-composited grids matched real-screenshot picks on **`57/59`** overall and **`53/53`** passing the `0.25` margin (Pillow-composited: `58/59` and `52/52`). Only `5/531` scores shifted by `> 0.03` (max `0.20`; one server-drawn tile shifted `0.13` vs. `0.45`, same side of cutoff).
   - *Live randomized `182`-attempt A/B* *(caveat: ran while the runner still composited with Pillow, and two runner copies overlapped by mistake)*: Median delay from tile reveal to next click fell from **`0.77 s` to `0.06 s`**; `84/90` early answers were used (`6` margin fallbacks); 3-round dynamic median fell from **`10.4 s` to `9.1 s`** and 4-round from **`15.4 s` to `13.6 s`**; overall solves were `82/83` vs. `83/85`.
   - *Server-composited follow-up (`30` attempts):* `30` early answers used, `7` fallbacks, `0` failed requests.
@@ -248,7 +248,7 @@ Headless Camoufox `158.0.1-beta.41`, live localhost reCAPTCHA v2 Enterprise chec
 
 ### E. Transport, Fan-Out, Compression, Warming & Hedged Retries (`vLLM/d3-ultra`)
 
-- **Parallel request fan-out** (`--close-ups-per-request` / `--vllm-close-ups-per-request`, default `4`, range `2–9`; provider limit `16` concurrent/key):
+- **Parallel request fan-out** (`--close-ups-per-request`, default `4`, range `2–9`; provider limit `16` concurrent/key):
   - Provider compute scales with crops per request: `~0.12 s` (2 crops), `~0.26 s` (4 crops), `~0.50 s` (8 crops). Scores are invariant to batch grouping whenever a request carries `≥ 2` crops — verified 100% identical across `258` labelled grids and `30/30` extra grids (`8` vs. `4` crops: `8,216` vs. `9,328` tokens, compute `505 ms` vs. `262 ms`, wall `1,310 ms` vs. `745 ms`).
   - Smaller batches (`3`/req: `0.77 s`; `2`/req across `3` keys: `0.83 s`) increased total upload bytes and tail latency compared to `4`/req (`0.73 s`).
 
@@ -259,7 +259,7 @@ Headless Camoufox `158.0.1-beta.41`, live localhost reCAPTCHA v2 Enterprise chec
 | Live pre-box run (`398` 3×3 / `240` 4×4 rounds) | — | 4 / 9–10 | — | **0.51 s / 0.70 s** | — | — / > 1.40 s |
 
 - **Gzip & HTTP/1.1 vs. HTTP/2:** Fast gzip shrinks base64 JSON payloads by `~25%` on vLLM (rejected by Liquid). Multiplexing over HTTP/2 was no faster than one HTTP/1.1 connection per parallel request: a single shared HTTP/2 connection took `0.87 s` on its fastest quarter of rounds vs. `0.67 s` on HTTP/1.1, and `2–5` HTTP/2 connections gave no speedup while triggering key rate-limit refusals on `20–50%` of rounds. The client therefore stays on HTTP/1.1.
-- **Connection warming** (vLLM; disable with `--cold-connections` / `--vllm-cold-connections`): Without warming, the first 4×4 round after startup took `~4 s` and the second `~1.5 s`. Both startup warming and `pool_max_idle_per_host` scale dynamically to `2 + box_reqs + passes * batches` (**`6` / `7` / `11` / `12`** connections for `low` / `medium` / `high` / `max`), priming each socket with one `544×544` noise-JPEG request (`~270 KB`, `394` input tokens). Connections stay warm for `300 s`, ping `GET /models` after `45 s` idle, and re-warm after `90 s` or a slow ping. A round `4 s` after start took `1.4 s` (half waiting on the initial warmup wave), and subsequent rounds — including after `20 s`, `50 s`, and `100 s` idle gaps — completed in **`0.63–0.75 s`** (one outlier at `1.5 s`).
+- **Connection warming** (vLLM; disable with `--cold-connections`): Without warming, the first 4×4 round after startup took `~4 s` and the second `~1.5 s`. Both startup warming and `pool_max_idle_per_host` scale dynamically to `2 + box_reqs + passes * batches` (**`6` / `7` / `11` / `12`** connections for `low` / `medium` / `high` / `max`), priming each socket with one `544×544` noise-JPEG request (`~270 KB`, `394` input tokens). Connections stay warm for `300 s`, ping `GET /models` after `45 s` idle, and re-warm after `90 s` or a slow ping. A round `4 s` after start took `1.4 s` (half waiting on the initial warmup wave), and subsequent rounds — including after `20 s`, `50 s`, and `100 s` idle gaps — completed in **`0.63–0.75 s`** (one outlier at `1.5 s`).
 - **Hedged retries** (vLLM; `HEDGE_AT = [1.5 s, 4.0 s, 8.0 s]`, rotated round-robin across `VLLM_SR_EXTRA_API_KEYS`): Roughly `1` in several hundred provider requests stalls `≥ 10 s` while sibling requests finish normally; on degraded networks `~5–6%` remained unanswered at `4 s`. Transient `429`/`5xx`/connection errors also retry once (`150 ms` or `Retry-After` capped at `10 s`).
 - **Box-request upload wall cost:** Measured only on a slow **`16 Mbps`** uplink (`50` grids alternating pre-level box rule off/on): median **`+0.6 s`** over a `2.5 s` baseline. Wall cost on a fast uplink has not been measured live.
 
@@ -282,5 +282,5 @@ To keep empirical claims honest, the following configurations have **not** been 
 2. **`--effort` ladder (`low` / `medium` / `high` / `max`) live verdicts & fast-uplink latency:** All effort-level accuracy and wait-time numbers come from offline replays on saved grids (and the sole wall-time box measurement used a slow `16 Mbps` uplink).
 3. **`Liquid/d1.2` and `Liquid/d1.2-ultra` live browser trials:** Both Liquid models have been measured only on offline saved grids and direct `/model` parity rounds, never against live Google reCAPTCHA or hCaptcha widgets.
 4. **hCaptcha live pass rate & labelled grid accuracy:** `0` labelled hCaptcha grids and `0` live challenge trials have been recorded; only canvas segmentation (`6/6` captures) and public test-key integration have been verified.
-5. **Verdict-counting `--max-stages` semantics:** The `200`-attempt live run counted each submitted grid toward `--max-stages`; the updated verdict-counting behavior in `scripts/chrome_lab.py` has not yet been measured live.
+5. **Verdict-counting `--max-stages` semantics:** The `200`-attempt live run counted each submitted grid toward `--max-stages`; the updated verdict-counting behavior in `scripts/recaptcha_lab.py` has not yet been measured live.
 6. **Late hedged-retry tiers (`4 s` / `8 s`) under real network degradation:** Only the `1.5 s` hedge tier has been observed in live runs; the `4 s` and `8 s` retries are untested against a live degraded link.

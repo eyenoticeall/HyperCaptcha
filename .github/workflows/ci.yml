@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   rust:
-    name: Rust (fmt, clippy, test)
+    name: Rust (fmt, clippy, test, cli)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -31,6 +31,17 @@ jobs:
       - name: Run unit, integration, and fixture parity tests
         run: cargo test --locked
 
+      - name: Run offline CLI smoke checks
+        shell: bash
+        run: |
+          shopt -s globstar
+          cargo run --locked -- models >/dev/null
+          cargo run --locked -- models --json >/dev/null
+          cargo run --locked -- validate-config \
+            models/recaptcha/**/*.toml \
+            models/hcaptcha/**/*.toml \
+            models/examples/custom-decision-model.toml
+
   python:
     name: Python (py_compile, scripts, pytest)
     runs-on: ubuntu-latest
@@ -43,13 +54,12 @@ jobs:
           python-version: "3.11"
 
       - name: Syntax-check browser runner scripts
-        run: uv run python -m py_compile scripts/chrome_lab.py scripts/camoufox_lab.py scripts/hcaptcha_lab.py
+        run: uv run --extra browser python -m py_compile scripts/_common.py scripts/recaptcha_lab.py scripts/hcaptcha_lab.py
 
       - name: Check browser runner script imports and CLI help
         run: |
-          uv run --extra browser python scripts/chrome_lab.py --help >/dev/null
+          uv run --extra browser python scripts/recaptcha_lab.py --help >/dev/null
           uv run --extra browser python scripts/hcaptcha_lab.py --help >/dev/null
-          uv run --extra camoufox python scripts/camoufox_lab.py --help >/dev/null
 
       - name: Run offline evaluation and parity tests
         run: uv run --extra dev pytest -v
