@@ -69,7 +69,7 @@ Every `POST` endpoint appends a single JSON line to `--log <path>` (or `io::sink
   - `dialect` (`systemone-assets` vs. `systemone-images`)
   - `base_url`, `api_key_envs`, `extra_api_keys_env`, `extra_headers`
   - `image_format`, `crop_filter`, `gzip`, `max_images`, `multi_state_windows`, `supports_every_box`, `return_meta`, `hedge_on_stall`, `warm_connections`, `min_patch_tokens`
-- **`Plan` (`src/plan.rs`):** Owned, deserializable struct describing a 4×4 round (`close_ups: Vec<Option<u32>>`, `select_from`, `skip_below`, `gap: Option<GapRule>`, `boxes: Option<BoxRule>`, `record_boxes: Vec<BoxAsk>`). `close_ups` accepts `"capture"` (`None`) or a positive pixel length (`Some(px)`) in TOML and serializes as `[null, 506]` in `GET /config` JSON.
+- **`Plan` (`src/plan.rs`):** Owned, deserializable struct describing a 4×4 round (`close_ups: Vec<Option<u32>>`, `select_from`, `skip_below`, `boxes: Option<BoxRule>`, `gap: Option<GapRule>`; `--record` constructs `Plan::record(wire.supports_every_box)`). `close_ups` accepts `"capture"` (`None`) or a positive pixel length (`Some(px)`) in TOML and serializes as `[null, 506]` in `GET /config` JSON.
 
 ---
 
