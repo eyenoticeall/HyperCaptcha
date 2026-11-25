@@ -18,7 +18,7 @@ import numpy as np
 import pytest
 
 from eval.cli import main as cli_main
-from eval.dataset import build_dataset
+from eval.dataset import UNIFORM_3X3_PICTURES, build_dataset
 from eval.export import export_model, render_model_toml
 from eval.fit import fit_dataset
 from eval.label_server import LabelStore, compare_labels, create_label_server
@@ -828,6 +828,159 @@ def test_end_to_end_fit_sweep_export_and_fixture(tmp_path: Path) -> None:
     )
     with pytest.raises(ValueError, match="supports_every_box"):
         render_model_toml(bad_every)
+
+    # Validation check: BoxRule with no whole/every/windows must be rejected (matches Rust).
+    empty_boxes = ModelConfig(
+        schema_version=1,
+        service="recaptcha",
+        name="vLLM/empty-box",
+        provider="vllm",
+        model_id="bad",
+        tuning=TuningConfig(
+            default_decision="logistic",
+            logistic_4x4=(0.2, 1.0, 0.2, 0.2, -1.5),
+            efforts=Efforts(
+                low=Plan(close_ups=(506,), select_from=0.5),
+                medium=Plan(close_ups=(506,), select_from=0.5, boxes=BoxRule(exempt_from=0.9)),
+                high=Plan(close_ups=(506,), select_from=0.5),
+                max=Plan(close_ups=(506,), select_from=0.5),
+            ),
+        ),
+    )
+    with pytest.raises(ValueError, match="at least one of whole, every, or windows"):
+        render_model_toml(empty_boxes)
+
+    # Schema parity: omitted `tuning.default_decision` in TOML defaults to "average" (matches Rust).
+    minimal_toml = tmp_path / "minimal_average.toml"
+    minimal_toml.write_text(
+        'schema_version = 1\nservice = "hcaptcha"\nname = "vLLM/test"\nprovider = "vllm"\nmodel_id = "test"\n\n[tuning]\n',
+        encoding="utf-8",
+    )
+    loaded_min = load_model_config(minimal_toml)
+    assert loaded_min.tuning is not None
+    assert loaded_min.tuning.default_decision == "average"
+
+
+def test_hcaptcha_dataset_and_record_preserve_pictures(tmp_path: Path) -> None:
+    """Verify hCaptcha `dataset` -> `record` sends valid 9-picture rects for both grid-* and task-* PNGs."""
+    run_dir = tmp_path / "hc_run"
+    (run_dir / "t-grid").mkdir(parents=True)
+    (run_dir / "t-task").mkdir(parents=True)
+
+    (run_dir / "t-grid" / "grid-01.png").write_bytes(TINY_PNG + b"hc-grid-01")
+    (run_dir / "t-task" / "task-01.png").write_bytes(TINY_PNG + b"hc-task-01")
+
+    custom_pictures = [[0.1 + 0.25 * c, 0.05 + 0.3 * r, 0.2, 0.25] for r in range(3) for c in range(3)]
+    trials = [
+        {
+            "trial_id": "t-grid",
+            "captcha": "hcaptcha",
+            "rounds": [{"prompt": "Pick the flying animal", "page": 1, "pages": 1, "pictures": custom_pictures}],
+        },
+        {
+            "trial_id": "t-task",
+            "captcha": "hcaptcha",
+            "rounds": [{"prompt": "Pick the tiger", "page": 1, "pages": 1, "pictures": custom_pictures}],
+        },
+    ]
+    (run_dir / "trials.jsonl").write_text("\n".join(json.dumps(t) for t in trials) + "\n", encoding="utf-8")
+
+    ds_path = tmp_path / "hc_dataset.jsonl"
+    stats = build_dataset([run_dir], ds_path)
+    assert stats["written"] == 2
+    rows = [json.loads(line) for line in ds_path.read_text(encoding="utf-8").splitlines()]
+    by_group = {r["group_id"]: r for r in rows}
+    assert by_group["t-grid"]["pictures"] == UNIFORM_3X3_PICTURES
+    assert by_group["t-task"]["pictures"] == custom_pictures
+
+    # Also add a pre-composed grid entry with `pictures` omitted to test record's fallback.
+    fallback_img = tmp_path / "grid-99.png"
+    fallback_img.write_bytes(TINY_PNG + b"hc-grid-99")
+    with ds_path.open("a", encoding="utf-8") as handle:
+        handle.write(
+            json.dumps(
+                {
+                    "id": "hc-fallback",
+                    "group_id": "t-fb",
+                    "service": "hcaptcha",
+                    "layout": 3,
+                    "prompt": "Pick the boat",
+                    "image": "grid-99.png",
+                }
+            )
+            + "\n"
+        )
+
+    received: list[dict[str, Any]] = []
+
+    class MockHcaptchaLab(BaseHTTPRequestHandler):
+        def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
+            return
+
+        def do_POST(self) -> None:  # noqa: N802
+            length = int(self.headers.get("Content-Length", "0"))
+            req_body = json.loads(self.rfile.read(length).decode("utf-8"))
+            received.append(req_body)
+            probs = {str(i): 0.4 for i in range(1, 10)}
+            body = json.dumps(
+                {
+                    "result": {
+                        "status": "answered",
+                        "prediction": {"type": "tiles", "value": []},
+                        "vllm_components": {
+                            "whole_grid": {"tile_probabilities": probs},
+                            "variant": {"tile_probabilities": probs},
+                        },
+                    }
+                }
+            ).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), MockHcaptchaLab)
+    port = server.server_address[1]
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        rec_out = tmp_path / "hc_rec.jsonl"
+        res = record_dataset(
+            ds_path,
+            rec_out,
+            passes=1,
+            workers=1,
+            server_url=f"http://hypercaptcha.localhost:{port}",
+        )
+        assert res["recorded"] == 3
+        assert res["failed"] == []
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    by_prompt = {r["prompt"]: r for r in received}
+    assert "layout" not in by_prompt["Pick the flying animal"]
+    assert by_prompt["Pick the flying animal"]["pictures"] == UNIFORM_3X3_PICTURES
+    assert by_prompt["Pick the tiger"]["pictures"] == custom_pictures
+    assert by_prompt["Pick the boat"]["pictures"] == UNIFORM_3X3_PICTURES
+
+
+def test_record_spawn_error_reports_numeric_exit_code(tmp_path: Path) -> None:
+    """Verify silent early server exit reports numeric exit code instead of `code None`."""
+    img = tmp_path / "g1.png"
+    img.write_bytes(TINY_PNG)
+    ds_path = tmp_path / "ds.jsonl"
+    ds_path.write_text(
+        json.dumps({"id": "g1", "group_id": "t1", "service": "recaptcha", "layout": 4, "prompt": "Select all squares with\nbuses", "image": "g1.png"}) + "\n",
+        encoding="utf-8",
+    )
+    fake_bin = tmp_path / "fake_hypercaptcha.sh"
+    fake_bin.write_text("#!/bin/sh\nexit 42\n", encoding="utf-8")
+    fake_bin.chmod(0o755)
+
+    with pytest.raises(RuntimeError, match="server exited with code 42"):
+        record_dataset(ds_path, tmp_path / "out.jsonl", binary=str(fake_bin))
 
 
 def test_sweep_handles_whole_only_and_no_box_recordings(tmp_path: Path) -> None:

@@ -11,6 +11,13 @@ from typing import Any, Sequence
 
 from eval.schema import allows_skipping_prompt, read_jsonl
 
+# Uniform 3x3 tile boxes `[left, top, width, height]` for pre-composed gapless hCaptcha grids.
+UNIFORM_3X3_PICTURES: list[list[float]] = [
+    [col / 3.0, row / 3.0, 1.0 / 3.0, 1.0 / 3.0]
+    for row in range(3)
+    for col in range(3)
+]
+
 
 def _find_trial_files(inputs: Sequence[str | Path]) -> list[tuple[Path, Path, str]]:
     """Return `(trials_jsonl_path, run_dir, source_run_name)` for each input."""
@@ -40,21 +47,24 @@ def _resolve_round_image(
     trial_id: str | None,
     round_idx: int,
     service: str,
-) -> Path | None:
-    """Resolve a round's PNG image path across absolute, relative, or hCaptcha directory layouts."""
+) -> tuple[Path | None, bool]:
+    """Resolve a round's PNG image path and whether it is a pre-composed hCaptcha 3x3 grid."""
     raw_image = rnd.get("image")
     if raw_image:
         cand = Path(raw_image)
         if cand.is_file():
-            return cand.resolve()
+            resolved = cand.resolve()
+            return resolved, (service == "hcaptcha" and resolved.name.startswith("grid-"))
         for base in (run_dir, run_dir / (trial_id or "")):
             alt = base / cand.name
             if alt.is_file():
-                return alt.resolve()
+                resolved = alt.resolve()
+                return resolved, (service == "hcaptcha" and resolved.name.startswith("grid-"))
             rel = base / cand
             if rel.is_file():
-                return rel.resolve()
-        return None
+                resolved = rel.resolve()
+                return resolved, (service == "hcaptcha" and resolved.name.startswith("grid-"))
+        return None, False
 
     # hcaptcha_lab.py writes grid-NN.png / task-NN.png inside run_dir / trial_id.
     if trial_id:
@@ -63,15 +73,15 @@ def _resolve_round_image(
             if service == "hcaptcha":
                 grids = sorted(tdir.glob("grid-*.png"))
                 if round_idx < len(grids):
-                    return grids[round_idx].resolve()
+                    return grids[round_idx].resolve(), True
                 tasks = sorted(tdir.glob("task-*.png"))
                 if round_idx < len(tasks):
-                    return tasks[round_idx].resolve()
+                    return tasks[round_idx].resolve(), False
             else:
                 cand = tdir / f"round-{round_idx + 1:02d}.png"
                 if cand.is_file():
-                    return cand.resolve()
-    return None
+                    return cand.resolve(), False
+    return None, False
 
 
 def _format_image_path(image_path: Path, output_dir: Path, *, absolute_paths: bool) -> str:
@@ -141,7 +151,9 @@ def build_dataset(
                     stats["filtered_out"] += 1
                     continue
 
-                img_path = _resolve_round_image(rnd, run_dir, raw_trial_id, round_idx, trial_service)
+                img_path, is_precomposed_grid = _resolve_round_image(
+                    rnd, run_dir, raw_trial_id, round_idx, trial_service
+                )
                 if img_path is None:
                     stats["missing_images"] += 1
                     continue
@@ -152,7 +164,7 @@ def build_dataset(
                     continue
                 seen_hashes.add(sha)
 
-                entry = {
+                entry: dict[str, Any] = {
                     "id": f"{trial_service[:3]}-{rnd_layout}x{rnd_layout}-{sha[:12]}",
                     "group_id": group_id,
                     "service": trial_service,
@@ -163,6 +175,11 @@ def build_dataset(
                     "allows_skipping": allows_skipping_prompt(prompt, trial_service),
                     "source_run": source_run,
                 }
+                if trial_service == "hcaptcha":
+                    if is_precomposed_grid:
+                        entry["pictures"] = [list(box) for box in UNIFORM_3X3_PICTURES]
+                    elif isinstance(rnd.get("pictures"), list) and len(rnd["pictures"]) == 9:
+                        entry["pictures"] = rnd["pictures"]
                 manifest.append(entry)
                 if limit is not None and len(manifest) >= limit:
                     break
