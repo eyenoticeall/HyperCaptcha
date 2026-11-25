@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/assets/banner.png" alt="HyperCaptcha — Open-source research harness for multimodal CAPTCHA evaluation" width="100%" />
+</p>
+
 # HyperCaptcha
 
 HyperCaptcha is an open-source Rust and Python research harness for evaluating **multimodal decision models** on real CAPTCHA widgets (Google reCAPTCHA and hCaptcha) and saved offline grids. It pairs a strict localhost lab server with declarative TOML model configurations, automated Chrome/Camoufox runners, and a standalone Python evaluation toolkit (`hypercaptcha-eval`) for labeling, recording, fitting, sweeping, and verifying decision rules.
