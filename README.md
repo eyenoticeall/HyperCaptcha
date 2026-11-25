@@ -4,11 +4,11 @@
 
 # HyperCaptcha
 
-**HyperCaptcha** is an open-source Rust and Python harness for solving and benchmarking real CAPTCHA challenges (**Google reCAPTCHA** and **hCaptcha**) with multimodal decision models.
+**HyperCaptcha** is an open-source harness for solving and benchmarking **Google reCAPTCHA** and **hCaptcha** challenges with multimodal vision models.
 
-Instead of sending a raw screenshot to a model once, the HyperCaptcha harness runs a local test page, crops and encodes each challenge grid deterministically, fans out parallel multi-view tile checks and optional bounding-box verification, and scores or submits the resulting tile picks. You can measure how well any supported model solves CAPTCHAs **live in Camoufox** or **offline on saved grids** using the included `hypercaptcha-eval` toolkit.
+Rather than asking a model once on a raw screenshot, the Rust server breaks each challenge grid into whole-grid and close-up views, combines tile scores with optional bounding-box checks, and logs every answer alongside the CAPTCHA verdict. You can test models **live in Camoufox** against a local widget or **tune and evaluate them offline** on saved grids with `hypercaptcha-eval`.
 
-> **Research Scope & Responsible Use:** HyperCaptcha binds strictly to loopback (`127.0.0.1`) and is built for empirical research using researcher-owned CAPTCHA keys, official vendor test keys (`--google-test-key` / `--hcaptcha-test-key`), or offline saved grids. Do **not** use this repository against third-party websites without explicit written authorization. See [SECURITY.md](SECURITY.md) · Licensed under [Apache-2.0](LICENSE).
+> **Localhost research lab:** HyperCaptcha only serves pages on `127.0.0.1` for testing with your own CAPTCHA keys, vendor test keys, or saved offline grids — not third-party sites. See [SECURITY.md](SECURITY.md) · [Apache-2.0](LICENSE).
 
 ---
 
