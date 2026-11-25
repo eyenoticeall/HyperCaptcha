@@ -33,7 +33,7 @@ HyperCaptcha lets you dial how much work the harness asks a model to do on each 
 ### Side-by-Side Tile Selections on Real 4×4 Grids
 
 <p align="center">
-  <img src="docs/assets/example-model-selections.png" alt="Side-by-side comparison of real recorded tile selections from vLLM/d3-ultra, Liquid/d1.2-ultra, and typesafe/Jev on identical 4x4 reCAPTCHA crosswalk and traffic-light grids" width="100%" />
+  <img src="docs/assets/example-model-selections.png" alt="Side-by-side comparison of real recorded tile selections from vLLM/d3-ultra, Liquid/d1.2-ultra, and typesafe/Jev on identical 4x4 reCAPTCHA traffic-light and motorcycle grids" width="100%" />
 </p>
 
 - **Why `--effort high` is the default:** Inside HyperCaptcha, `vLLM/d3-ultra` at `high` solves **`82.9%` (`281/339`)** of 4×4 test grids — within 1 grid of `max` (`83.2%`, `282/339`) while using **`4,404` fewer input tokens** and cutting median provider compute wait roughly in half (**`282 ms`** vs. **`556 ms`**).
