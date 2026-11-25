@@ -14,28 +14,29 @@ cargo clippy --all-targets -- -D warnings
 cargo test --locked
 ```
 
-### Python Lab & Evaluation Scripts
+### Python Lab & Evaluation Toolkit
 
-Verify Python scripts under `scripts/` and run any Python evaluation or unit tests in your local virtual environment:
+Verify browser runner scripts under `scripts/` and run the offline Python evaluation and parity test suite:
 
 ```bash
-python3 -m py_compile scripts/chrome_lab.py scripts/camoufox_lab.py scripts/hcaptcha_lab.py
-pytest
+uv run python -m py_compile scripts/chrome_lab.py scripts/camoufox_lab.py scripts/hcaptcha_lab.py
+uv run --extra dev pytest -v
 ```
 
 ## Contributing a New Decision-Model Configuration
 
-Decision-model profiles (prompts, multi-view weights, effort levels, thresholds, and box-veto rules) live under `src/captcha/<service>/<provider>/<model>.rs`:
+Built-in decision-model configurations (endpoint capabilities, multi-view weights, effort levels, thresholds, and box-veto rules) live as declarative TOML files (`schema_version = 1`) under `models/<service>/<provider>/<model>.toml`. See [docs/ADDING_MODELS.md](docs/ADDING_MODELS.md) for the full schema, capability flags, and offline tuning loop:
 
-1. Add a model module under the appropriate service and provider directory (for example, `src/captcha/recaptcha/<provider>/<model>.rs`) defining its `Model` spec, weights, and effort levels.
-2. Register the model in `src/captcha/<service>/mod.rs` and wire provider routing in `src/providers.rs` if adding a new provider endpoint.
-3. Document the empirical evaluation methodology, dataset split, token/request budgets, and trade-offs rather than cherry-picked runs.
-4. Keep offline experiments and live logs in gitignored paths (`/reports/`, `/datasets/`), never in git history.
+1. Prototype and validate your configuration externally with `--model-config <path.toml>` (or record an unmeasured model on an existing provider with `--record` / `--decision-rule average`).
+2. Use `hypercaptcha-eval` (`dataset` -> `label` -> `record` -> `fit` -> `sweep` -> `export`) to fit logistic weights, sweep effort tiers, and export a validated TOML file plus an image-free parity fixture.
+3. To add a built-in model, place its TOML under `models/<service>/<provider>/<model>.toml` and register it via `include_str!` in `src/captcha/<service>/mod.rs` (only edit `src/providers.rs` / `src/captcha/mod.rs` if adding a new wire dialect beyond `systemone-assets` and `systemone-images`).
+4. Document the empirical evaluation methodology, dataset split, label version, token/request budgets, and trade-offs rather than cherry-picked runs.
+5. Keep offline experiments, raw captures, labels, and live logs in gitignored paths (`/reports/`, `/datasets/`, `/recordings/`), never in git history.
 
 ## Adding Parity Fixtures
 
-Regression and parity tests in `tests/model_routes.rs` validate exact decision-rule behavior without hitting live APIs or bundling CAPTCHA imagery:
+Regression and parity tests in `src/providers.rs`, `tests/model_routes.rs`, and `tests/test_eval.py` validate exact decision-rule parity without hitting live APIs or bundling CAPTCHA imagery:
 
-- Place compressed fixtures under `tests/fixtures/` (for example, `tests/fixtures/<provider>_<model>_4x4.json.gz`).
-- **Image-free and label-free requirement**: Fixtures must contain only sanitized model score/box outputs and synthetic decision inputs — never raw CAPTCHA images, third-party URLs, API keys, or proprietary datasets.
-- Add or update test cases in `tests/model_routes.rs` to assert exact tile selection, score parity, and effort-level behavior, and confirm `cargo test --locked` passes.
+- Generate compressed fixtures with `hypercaptcha-eval export --fixture tests/fixtures/<provider>_<model>_4x4.json.gz ...`.
+- **Image-free and label-free requirement**: Fixtures must contain only sanitized model score/box outputs and expected tile picks — never raw CAPTCHA images, human ground-truth labels, third-party URLs, API keys, or proprietary datasets.
+- Add or update parity assertions in Rust and Python, and confirm both `cargo test --locked` and `uv run --extra dev pytest -v` pass.
