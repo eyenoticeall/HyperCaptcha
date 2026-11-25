@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>HyperCaptcha Lab</title>
+  <link rel="stylesheet" href="/lab.css">
+  <script type="module" src="/lab.js"></script>
+</head>
+<body>
+  <main>
+    <header>
+      <p class="project">HyperCaptcha Lab</p>
+      <h1 id="mode">Google reCAPTCHA</h1>
+      <p id="context">Loading configuration…</p>
+    </header>
+    <div class="workspace">
+      <section aria-labelledby="widget-title">
+        <h2 id="widget-title">Google widget</h2>
+        <div id="widget"></div>
+        <button id="run-score" type="button" hidden disabled>Request assessment</button>
+        <button id="run-challenge" type="button" hidden disabled>Request image challenge</button>
+        <p id="google-status" class="status" role="status">Loading Google reCAPTCHA…</p>
+        <pre id="google-result" hidden></pre>
+        <form id="observation-form" hidden>
+          <label for="observation">Observed trial outcome</label>
+          <select id="observation" required>
+            <option value="">Choose an outcome</option>
+            <option value="no_image_challenge">No image challenge shown</option>
+            <option value="model_solved">Image challenge passed with model selections</option>
+            <option value="model_failed">Image challenge failed with model selections</option>
+            <option value="human_solved">Image challenge passed with human selections</option>
+            <option value="abandoned">Abandoned</option>
+          </select>
+          <button class="secondary" type="submit">Record outcome</button>
+        </form>
+        <p id="observation-status" role="status" hidden></p>
+        <button id="next" class="secondary" type="button" hidden>Start next trial</button>
+      </section>
+      <section aria-labelledby="model-title">
+        <h2 id="model-title">Model result</h2>
+        <p id="model-info"></p>
+        <a id="companion" target="_blank" rel="noopener" hidden>Open model panel in a separate tab</a>
+        <form id="image-form" hidden>
+          <label for="prompt">Challenge instructions</label>
+          <input id="prompt" type="text" maxlength="280" placeholder="Select all images with bicycles" required>
+          <label for="layout">Grid layout</label>
+          <select id="layout">
+            <option value="3">3 × 3</option>
+            <option value="4">4 × 4</option>
+          </select>
+          <label for="image">Cropped grid screenshot (PNG)</label>
+          <input id="image" type="file" accept="image/png" required>
+          <button id="ask" type="submit">Get tile selections</button>
+        </form>
+        <p id="model-status" class="status" role="status" hidden></p>
+        <pre id="model-result" hidden></pre>
+      </section>
+    </div>
+    <footer>Trial <code id="trial-id"></code></footer>
+  </main>
+</body>
+</html>

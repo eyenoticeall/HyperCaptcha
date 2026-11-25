@@ -1,0 +1,15 @@
+/target/
+/reports/
+/references/
+/datasets/
+/recordings/
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.env
+.env.*
+!.env.example
+.DS_Store
+*.pkl
+*.npz

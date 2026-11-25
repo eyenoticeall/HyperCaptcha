@@ -1,0 +1,23 @@
+[package]
+name = "hypercaptcha"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+description = "Browser research harness for Google reCAPTCHA and model APIs"
+
+[dependencies]
+anyhow = "1"
+base64 = "0.22"
+clap = { version = "4.5", features = ["derive"] }
+flate2 = "1"
+image = { version = "0.25.10", default-features = false, features = ["jpeg", "png"] }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tiny-skia = { version = "0.11", default-features = false, features = ["std", "png-format"] }
+tiny_http = "0.12"
+
+# The box rule's pictures are resized and JPEG-encoded by this crate's own code, which is slow
+# enough unoptimized to make the server's tests time one another out.
+[profile.dev]
+opt-level = 1

@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>HyperCaptcha Lab</title>
+  <link rel="stylesheet" href="/lab.css">
+  <script type="module" src="/lab.js"></script>
+</head>
+<body>
+  <main>
+    <header>
+      <p class="project">HyperCaptcha Lab</p>
+      <h1>hCaptcha</h1>
+      <p id="context">Loading configuration…</p>
+    </header>
+    <div class="workspace">
+      <section aria-labelledby="widget-title">
+        <h2 id="widget-title">hCaptcha widget</h2>
+        <div id="widget"></div>
+        <p id="status" class="status" role="status">Loading hCaptcha…</p>
+        <pre id="verdict" hidden></pre>
+        <button id="next" class="secondary" type="button" hidden>Start next trial</button>
+      </section>
+      <section aria-labelledby="model-title">
+        <h2 id="model-title">Model</h2>
+        <p id="model-info"></p>
+        <p>Only hCaptcha's grid task is answered: nine pictures and one instruction. Its other tasks are passed over.</p>
+      </section>
+    </div>
+    <footer>Trial <code id="trial-id"></code></footer>
+  </main>
+</body>
+</html>

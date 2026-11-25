@@ -1,0 +1,49 @@
+:root {
+  color-scheme: light;
+  --paper: #f2f6f8;
+  --ink: #183140;
+  --muted: #425b68;
+  --line: #bdcdd4;
+  --blue: #1a5679;
+  --white: #fff;
+  font: 16px/1.55 "Instrument Sans", "Helvetica Neue", sans-serif;
+  color: var(--ink);
+  background: var(--paper);
+}
+
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+body { margin: 0; }
+main { width: min(980px, calc(100% - 40px)); margin: clamp(36px, 8vw, 96px) auto; }
+header { padding: 0 0 28px; }
+.project { color: var(--blue); font-weight: 700; margin: 0; }
+h1 { font-size: clamp(2.3rem, 6vw, 4.4rem); line-height: 1.05; letter-spacing: -.055em; margin: 12px 0; }
+h2 { font-size: 1.2rem; letter-spacing: -.02em; margin: 0 0 16px; }
+p { margin: 0 0 16px; color: var(--muted); }
+.workspace { display: grid; grid-template-columns: minmax(360px, 1fr) minmax(0, 1fr); border-top: 3px solid var(--blue); background: var(--white); }
+section { min-width: 0; padding: clamp(20px, 3vw, 30px); }
+section + section { border-left: 1px solid var(--line); }
+#widget:not(:empty) { margin-bottom: 14px; }
+.status { min-height: 24px; margin-top: 14px; margin-bottom: 10px; }
+form { display: grid; gap: 8px; }
+label { font-size: .9rem; font-weight: 700; }
+input, select, button { font: inherit; }
+input, select { min-width: 0; padding: 7px 9px; border: 1px solid var(--line); border-radius: 4px; color: var(--ink); background: var(--white); margin-bottom: 5px; }
+button { justify-self: start; width: fit-content; padding: 8px 14px; border: 1px solid var(--blue); border-radius: 4px; color: var(--white); background: var(--blue); font-weight: 650; cursor: pointer; }
+button:disabled { opacity: .58; cursor: wait; }
+button.secondary { color: var(--blue); background: transparent; }
+a { color: var(--blue); }
+#companion { display: inline-block; margin-bottom: 16px; }
+#observation-form { margin: 14px 0; }
+:focus-visible { outline: 3px solid #267aaa; outline-offset: 3px; }
+pre { overflow: auto; max-height: 250px; background: var(--paper); white-space: pre-wrap; overflow-wrap: anywhere; padding: 12px; border-left: 2px solid var(--line); }
+footer { border-top: 1px solid var(--line); padding-top: 12px; color: var(--muted); font-size: .85rem; overflow-wrap: anywhere; }
+.companion-only .workspace { display: block; }
+.companion-only .workspace > section:first-child { display: none; }
+.companion-only .workspace > section + section { border: 0; }
+@media (max-width: 730px) {
+  main { width: min(500px, calc(100% - 24px)); }
+  .workspace { grid-template-columns: 1fr; }
+  section { padding-inline: 12px; }
+  section + section { border-left: 0; border-top: 1px solid var(--line); }
+}
