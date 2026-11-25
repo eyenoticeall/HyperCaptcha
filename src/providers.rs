@@ -1180,25 +1180,28 @@ impl Backend {
 
     /// Makes one box request's pictures and sends it.
     fn box_request(
-        wire: Wire,
+        mut wire: Wire,
         warm: Option<&Warm>,
         model: &str,
         target: &str,
         png: &[u8],
         ask: BoxAsk,
-        one_state: bool,
+        options: BoxWireOptions,
     ) -> Result<Value> {
         let start = Instant::now();
         let grid = boxes::decode_grid(png)?;
-        let json = match ask {
-            BoxAsk::Windows if one_state => {
-                return Self::window_requests(wire, model, target, &grid, start);
+        let payload = match ask {
+            BoxAsk::Windows if options.one_state => {
+                return Self::window_requests(wire, model, target, &grid, start, options);
             }
-            BoxAsk::Whole => boxes::whole_request(model, target, &grid)?,
-            BoxAsk::Every => boxes::every_request(model, target, &grid)?,
-            BoxAsk::Windows => boxes::windows_request(model, target, &grid)?,
+            BoxAsk::Whole => boxes::whole_request(model, target, &grid, options.return_meta)?,
+            BoxAsk::Every => boxes::every_request(model, target, &grid, options.return_meta)?,
+            BoxAsk::Windows => boxes::windows_request(model, target, &grid, options.return_meta)?,
         };
-        let wire = wire.carrying(json)?;
+        if options.min_patch_tokens {
+            wire.least_tokens = payload.patch_tokens;
+        }
+        let wire = wire.carrying(payload.json)?;
         let prepared = start.elapsed();
         if let Some(warm) = warm {
             warm.wait_for_keeper();
@@ -1206,6 +1209,7 @@ impl Backend {
         let start = Instant::now();
         let (mut reply, attempts): (Value, u8) = wire.send_hedged()?;
         ensure!(reply.is_object(), "the box reply is not an object");
+        check_least_tokens(reply.get("usage"), wire.least_tokens)?;
         if !reply["meta"].is_object() {
             reply["meta"] = json!({});
         }
@@ -1226,10 +1230,17 @@ impl Backend {
         target: &str,
         grid: &crate::pillow::Rgb,
         start: Instant,
+        options: BoxWireOptions,
     ) -> Result<Value> {
-        let requests = boxes::window_requests(model, target, grid)?
+        let requests = boxes::window_requests(model, target, grid, options.return_meta)?
             .into_iter()
-            .map(|(name, json)| Ok((name, wire.clone().carrying(json)?)))
+            .map(|(name, payload)| {
+                let mut window_wire = wire.clone();
+                if options.min_patch_tokens {
+                    window_wire.least_tokens = payload.patch_tokens;
+                }
+                Ok((name, window_wire.carrying(payload.json)?))
+            })
             .collect::<Result<Vec<_>>>()?;
         let prepared = start.elapsed();
         let start = Instant::now();
@@ -1237,14 +1248,26 @@ impl Backend {
         let replies = thread::scope(|scope| {
             let workers: Vec<_> = requests
                 .iter()
-                .map(|(name, wire)| (name, scope.spawn(|| wire.send_hedged::<Value>())))
+                .map(|(name, wire)| {
+                    (
+                        name,
+                        wire.least_tokens,
+                        scope.spawn(|| wire.send_hedged::<Value>()),
+                    )
+                })
                 .collect();
             workers
                 .into_iter()
-                .map(|(name, worker)| {
+                .map(|(name, least_tokens, worker)| {
                     let (reply, _) = worker
                         .join()
                         .map_err(|_| anyhow::anyhow!("a window request worker stopped"))?
+                        .with_context(|| format!("window {name}"))?;
+                    ensure!(
+                        reply.is_object(),
+                        "window {name}: the box reply is not an object"
+                    );
+                    check_least_tokens(reply.get("usage"), least_tokens)
                         .with_context(|| format!("window {name}"))?;
                     Ok((name.clone(), reply))
                 })
@@ -1281,14 +1304,18 @@ impl Backend {
     ) -> mpsc::Receiver<(BoxAsk, Result<Value>)> {
         let (results, replies) = mpsc::channel();
         let png: Arc<[u8]> = Arc::from(png);
-        let one_state = self.wire.as_ref().is_some_and(|w| !w.multi_state_windows);
+        let options = BoxWireOptions {
+            one_state: self.wire.as_ref().is_some_and(|w| !w.multi_state_windows),
+            return_meta: self.wire.as_ref().is_some_and(|w| w.return_meta),
+            min_patch_tokens: self.wire.as_ref().is_some_and(|w| w.min_patch_tokens),
+        };
         for ask in rule.asks() {
             let (wire, warm) = (self.empty_wire(true), self.warm.clone());
             let (results, png) = (results.clone(), Arc::clone(&png));
             let (model, target) = (self.model.clone(), target.to_owned());
             thread::spawn(move || {
                 let reply =
-                    Self::box_request(wire, warm.as_deref(), &model, &target, &png, ask, one_state);
+                    Self::box_request(wire, warm.as_deref(), &model, &target, &png, ask, options);
                 let _ = results.send((ask, reply));
             });
         }
@@ -1488,17 +1515,7 @@ impl Backend {
         };
         // An endpoint that does not read a request's pictures answers from the text alone, and
         // the only sign is how little it billed.
-        if wire.least_tokens > 0 {
-            let billed = result
-                .usage
-                .as_ref()
-                .and_then(|usage| usage["input_tokens"].as_u64());
-            ensure!(
-                billed.is_some_and(|billed| billed >= wire.least_tokens),
-                "the reply was billed {billed:?} input tokens and its pictures alone cost {}, so they were not read",
-                wire.least_tokens
-            );
-        }
+        check_least_tokens(result.usage.as_ref(), wire.least_tokens)?;
         if self.provider.is_decision() {
             let meta = result.meta.get_or_insert_with(|| json!({}));
             if let Some(fields) = meta.as_object_mut() {
@@ -1542,6 +1559,25 @@ const KEEPER_PATIENCE: Duration = Duration::from_millis(2500);
 /// Noise of this size makes a JPEG about twice the size of a round's largest scoring request,
 /// which leaves the connection able to send that request in one go.
 const PRACTICE_IMAGE_SIDE: u32 = 544;
+
+/// Wire flags forwarded from [`WireProfile`] to box request builders and response checks.
+#[derive(Clone, Copy)]
+struct BoxWireOptions {
+    one_state: bool,
+    return_meta: bool,
+    min_patch_tokens: bool,
+}
+
+fn check_least_tokens(usage: Option<&Value>, least_tokens: u64) -> Result<()> {
+    if least_tokens > 0 {
+        let billed = usage.and_then(|usage| usage["input_tokens"].as_u64());
+        ensure!(
+            billed.is_some_and(|billed| billed >= least_tokens),
+            "the reply was billed {billed:?} input tokens and its pictures alone cost {least_tokens}, so they were not read",
+        );
+    }
+    Ok(())
+}
 
 /// Everything one HTTP attempt needs, so that a duplicate can run on its own thread.
 #[derive(Clone)]

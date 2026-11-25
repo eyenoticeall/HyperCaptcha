@@ -89,14 +89,20 @@ pub fn assets_min_tokens(request: &Value) -> Result<u64> {
     Ok(tokens)
 }
 
+/// What a picture of `width × height` pixels costs: one and a half input tokens for each
+/// 32-pixel patch that covers it.
+pub fn patch_tokens(width: u32, height: u32) -> u64 {
+    let patches = u64::from(width.div_ceil(32)) * u64::from(height.div_ceil(32));
+    (patches * 3).div_ceil(2)
+}
+
 /// What a picture costs: one and a half input tokens for each 32-pixel patch that covers it.
 fn picture_tokens(base64: &str) -> Result<u64> {
     let bytes = STANDARD.decode(base64).context("decode the picture")?;
     let (width, height) = image::ImageReader::new(Cursor::new(bytes))
         .with_guessed_format()?
         .into_dimensions()?;
-    let patches = u64::from(width.div_ceil(32)) * u64::from(height.div_ceil(32));
-    Ok((patches * 3).div_ceil(2))
+    Ok(patch_tokens(width, height))
 }
 
 /// Collects the picture names a value mentions, in order and once each.

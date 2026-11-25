@@ -1108,6 +1108,7 @@ fn liquid_gets_its_pictures_as_a_list_and_each_window_in_a_request_of_its_own() 
             let body = &request.body;
             assert_eq!(body["model"], "d1.2-ultra");
             assert!(body.get("assets").is_none() && body.get("states").is_none());
+            assert!(body.get("options").is_none());
             let images = body["images"].as_array().unwrap();
             assert!(images.iter().all(|image| {
                 image
@@ -2565,6 +2566,7 @@ inside = 0.0
                         .unwrap()
                         .clone()
                 } else if questions.values().all(|q| q["type"] == "boxes") {
+                    assert!(body.get("options").is_none());
                     saw_every += 1;
                     let rect = json!({"left": 0.5, "top": 0.75, "right": 1.0, "bottom": 1.0});
                     json!({"q": {
@@ -2842,6 +2844,7 @@ fn unmeasured_models_can_be_recorded_and_evaluated_with_provider_agnostic_flags(
                         .unwrap()
                         .clone()
                 } else if questions.values().all(|q| q["type"] == "boxes") {
+                    assert!(body.get("options").is_none());
                     saw_every += 1;
                     json!({"q": {"type": "boxes", "count": 0, "at_least": false, "boxes": []}})
                         .as_object()
@@ -3168,4 +3171,873 @@ model_id = "vllm-sr/d3-ultra"
         "{}",
         String::from_utf8_lossy(&custom_no_cfg.stderr)
     );
+}
+
+#[test]
+fn single_line_manual_prompts_work_end_to_end_for_two_view_models() {
+    // 1. Two-view vLLM handles single-line 3×3 and 4×4 prompts from the manual web UI,
+    // while still rejecting prompts without a target.
+    {
+        let mock = Server::http("127.0.0.1:0").unwrap();
+        let api_base = format!("http://{}/v1", mock.server_addr());
+        let server = thread::spawn(move || {
+            let mut saw_3x3_target = false;
+            let mut saw_4x4_target = false;
+            // 2 vision checks + 3×3 (1 whole + 3 photos) + 4×4 low (1 whole + 4 close-ups).
+            for index in 0..2 + 4 + 5 {
+                let mut request = mock.recv_timeout(Duration::from_secs(10)).unwrap().unwrap();
+                let body = json_body(&mut request);
+                let questions = body["questions"].as_object().unwrap();
+                let answers: Value = if index < 2 {
+                    json!({"red": {"noul": if index == 0 { 0.99 } else { 0.01 }}})
+                } else {
+                    if let Some(target) = body["state"]["target"].as_str() {
+                        if questions.len() == 3 {
+                            assert_eq!(target, "bicycles");
+                            saw_3x3_target = true;
+                        } else {
+                            assert_eq!(target, "traffic lights");
+                            saw_4x4_target = true;
+                        }
+                    }
+                    Value::Object(
+                        questions
+                            .keys()
+                            .map(|id| {
+                                let score = if matches!(id.as_str(), "tile_01" | "tile_16") {
+                                    0.95
+                                } else {
+                                    0.05
+                                };
+                                (id.clone(), json!({"noul": score}))
+                            })
+                            .collect(),
+                    )
+                };
+                request
+                    .respond(Response::from_string(
+                        json!({
+                            "model": "vllm-sr/d3-ultra",
+                            "answers": answers,
+                            "usage": {"input_tokens": 10, "output_tokens": 0},
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap();
+            }
+            assert!(saw_3x3_target && saw_4x4_target);
+        });
+
+        let (_process, url) = start_lab("v2", "vllm", &api_base, &[]);
+        let client = Client::new();
+        let image = STANDARD.encode(
+            tiny_skia::Pixmap::new(320, 320)
+                .unwrap()
+                .encode_png()
+                .unwrap(),
+        );
+        let r3: Value = client
+            .post(format!("{url}/model"))
+            .header("Origin", &url)
+            .json(&json!({
+                "trial_id": "manual-3x3",
+                "source": "browser",
+                "layout": 3,
+                "prompt": "Select all images with bicycles",
+                "image": image,
+            }))
+            .send()
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .unwrap();
+        assert_eq!(r3["result"]["status"], "answered");
+        assert_eq!(r3["result"]["prediction"]["value"], json!([1]));
+
+        let r4: Value = client
+            .post(format!("{url}/model"))
+            .header("Origin", &url)
+            .json(&json!({
+                "trial_id": "manual-4x4",
+                "source": "browser",
+                "layout": 4,
+                "prompt": "Select all squares with traffic lights",
+                "image": image,
+            }))
+            .send()
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .unwrap();
+        assert_eq!(r4["result"]["status"], "answered");
+        assert_eq!(r4["result"]["prediction"]["value"], json!([1, 16]));
+
+        let missing: Value = client
+            .post(format!("{url}/model"))
+            .header("Origin", &url)
+            .json(&json!({
+                "trial_id": "manual-empty",
+                "source": "browser",
+                "layout": 3,
+                "prompt": "Select all images with",
+                "image": image,
+            }))
+            .send()
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .unwrap();
+        server.join().unwrap();
+        assert_eq!(missing["result"]["status"], "api_error");
+        assert!(
+            missing["result"]["error"]
+                .as_str()
+                .unwrap()
+                .contains("missing image challenge target")
+        );
+    }
+
+    // 2. Jev scene-and-crop uses single-line 4×4 prompts instead of falling back to whole-grid.
+    {
+        let mock = Server::http("127.0.0.1:0").unwrap();
+        let api_base = format!("http://{}/v1", mock.server_addr());
+        let server = thread::spawn(move || {
+            for probability in [0.95, 0.05] {
+                let request = mock.recv_timeout(Duration::from_secs(5)).unwrap().unwrap();
+                request
+                    .respond(Response::from_string(
+                        json!({"answers": {"red": {"type": "noul", "noul": probability}}})
+                            .to_string(),
+                    ))
+                    .unwrap();
+            }
+            let mut request = mock.recv_timeout(Duration::from_secs(5)).unwrap().unwrap();
+            let body: Value = serde_json::from_reader(request.as_reader()).unwrap();
+            assert_eq!(body["state"]["target"], "fire hydrant");
+            assert_eq!(body["assets"].as_object().unwrap().len(), 17);
+            let answers: serde_json::Map<_, _> = (1..=16)
+                .map(|tile| {
+                    (
+                        format!("tile_{tile:02}"),
+                        json!({"type": "noul", "noul": if tile == 4 { 0.9 } else { 0.1 }}),
+                    )
+                })
+                .collect();
+            request
+                .respond(Response::from_string(
+                    json!({"model": "test-model", "answers": answers}).to_string(),
+                ))
+                .unwrap();
+        });
+        let (_process, url) =
+            start_lab("v2", "jev", &api_base, &["--jev-vision", "scene-and-crop"]);
+        let image = STANDARD.encode(
+            tiny_skia::Pixmap::new(320, 320)
+                .unwrap()
+                .encode_png()
+                .unwrap(),
+        );
+        let reply: Value = Client::new()
+            .post(format!("{url}/model"))
+            .header("Origin", &url)
+            .json(&json!({
+                "trial_id": "jev-single-line",
+                "source": "browser",
+                "layout": 4,
+                "prompt": "Select all squares with a fire hydrant",
+                "image": image,
+            }))
+            .send()
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .unwrap();
+        server.join().unwrap();
+        assert_eq!(reply["result"]["status"], "answered");
+        assert_eq!(reply["result"]["jev_vision"], "scene-and-crop");
+        assert_eq!(reply["result"]["prediction"]["value"], json!([4]));
+    }
+}
+
+#[test]
+fn box_requests_respect_return_meta_and_enforce_min_patch_tokens() {
+    let image = STANDARD.encode(
+        tiny_skia::Pixmap::new(320, 320)
+            .unwrap()
+            .encode_png()
+            .unwrap(),
+    );
+
+    // 1. Liquid `every` box response billed fewer input tokens than its image patches cost is
+    // rejected (so the empty box reply does not drop at-risk square 14), and omits `options`.
+    {
+        let (api_base, mock) = many_at_once();
+        let server = thread::spawn(move || {
+            let mut saw_every = 0;
+            // 2 vision checks + 1 whole + 8 close-up batches + 1 every box.
+            for index in 0..2 + 1 + 8 + 1 {
+                let request = mock.recv_timeout(Duration::from_secs(20)).unwrap();
+                let body = &request.body;
+                assert!(body.get("options").is_none());
+                let questions = body["questions"].as_object().unwrap();
+                let (answers, input_tokens) = if index < 2 {
+                    (
+                        json!({"red": {"type": "noul", "noul": if index == 0 { 0.99 } else { 0.01 }}})
+                            .as_object()
+                            .unwrap()
+                            .clone(),
+                        5000,
+                    )
+                } else if questions.values().all(|q| q["type"] == "boxes") {
+                    saw_every += 1;
+                    (
+                        json!({"q": {"type": "boxes", "count": 0, "at_least": false, "boxes": []}})
+                            .as_object()
+                            .unwrap()
+                            .clone(),
+                        10,
+                    )
+                } else {
+                    let map = questions
+                        .keys()
+                        .map(|id| {
+                            let score = match id.as_str() {
+                                "tile_15" | "tile_16" => 0.9,
+                                "tile_14" => 0.6,
+                                _ => 0.0,
+                            };
+                            (id.clone(), json!({"type": "noul", "noul": score}))
+                        })
+                        .collect();
+                    (map, 5000)
+                };
+                let reply = json!({
+                    "model": "d1.2-ultra",
+                    "answers": answers,
+                    "usage": {"input_tokens": input_tokens, "output_tokens": 0},
+                });
+                request.reply.send(reply.to_string()).unwrap();
+            }
+            assert_eq!(saw_every, 1);
+        });
+        let (_process, url) = start_liquid_lab(&api_base, &[]);
+        let reply: Value = Client::new()
+            .post(format!("{url}/model"))
+            .header("Origin", &url)
+            .json(&json!({
+                "trial_id": "box-underbill-every",
+                "source": "chrome",
+                "layout": 4,
+                "prompt": "Select all squares with\nbicycles",
+                "image": image,
+            }))
+            .send()
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .unwrap();
+        server.join().unwrap();
+        assert_eq!(reply["result"]["status"], "answered");
+        // Failed box check leaves undecided at-risk tile 14 selected instead of dropping it.
+        assert_eq!(reply["result"]["prediction"]["value"], json!([14, 15, 16]));
+        let err = reply["result"]["vllm_components"]["boxes"]["error"]
+            .as_str()
+            .unwrap();
+        assert!(err.starts_with("every:"), "{err}");
+        assert!(err.contains("so they were not read"), "{err}");
+    }
+
+    // 2. Single-state `windows` and `whole` box requests reject under-billed responses and omit
+    // `options` when `return_meta = false`.
+    for underbill_windows in [false, true] {
+        let (api_base, mock) = many_at_once();
+        let config_file = TempFile::write(
+            &format!("custom-box-min-tokens-{underbill_windows}.toml"),
+            &format!(
+                r#"
+schema_version = 1
+service = "recaptcha"
+name = "Custom/box-guard"
+provider = "custom"
+model_id = "box-guard-v1"
+
+[endpoint]
+dialect = "systemone-images"
+base_url = "{api_base}"
+api_key_env = "BOX_GUARD_KEY"
+multi_state_windows = false
+supports_every_box = false
+return_meta = false
+min_patch_tokens = true
+
+[tuning]
+default_decision = "logistic"
+
+[tuning.logistic_4x4]
+weights = [0.223152, 1.092908, 0.213385, 0.18743, -1.509533]
+
+[tuning.efforts.low]
+close_ups = ["capture"]
+select_from = 0.5
+
+[tuning.efforts.medium]
+close_ups = ["capture"]
+select_from = 0.5
+
+[tuning.efforts.medium.boxes]
+exempt_from = 0.99
+whole = 0.3
+cover = 0.01
+inside = 0.0
+
+[tuning.efforts.high]
+close_ups = ["capture"]
+select_from = 0.5
+
+[tuning.efforts.high.boxes]
+exempt_from = 0.99
+windows = 0.3
+cover = 0.01
+inside = 0.0
+
+[tuning.efforts.max]
+close_ups = ["capture"]
+select_from = 0.5
+"#
+            ),
+        );
+        let effort = if underbill_windows { "high" } else { "medium" };
+        let expected_box_reqs = if underbill_windows { 16 } else { 1 };
+        let server = thread::spawn(move || {
+            let mut saw_box_reqs = 0;
+            // 2 vision checks + 1 whole + 4 close-ups + box requests (1 whole or 16 windows).
+            for index in 0..2 + 1 + 4 + expected_box_reqs {
+                let request = mock.recv_timeout(Duration::from_secs(20)).unwrap();
+                let body = &request.body;
+                assert!(body.get("options").is_none());
+                let questions = body["questions"].as_object().unwrap();
+                let is_box = questions.values().all(|q| q["type"] == "box");
+                let (answers, input_tokens) = if index < 2 {
+                    (
+                        json!({"red": {"type": "noul", "noul": if index == 0 { 0.99 } else { 0.01 }}})
+                            .as_object()
+                            .unwrap()
+                            .clone(),
+                        5000,
+                    )
+                } else if is_box {
+                    saw_box_reqs += 1;
+                    let tokens = if underbill_windows {
+                        // Under-bill just one of the sixteen single-state window replies.
+                        if saw_box_reqs == 1 { 10 } else { 5000 }
+                    } else {
+                        10
+                    };
+                    let map = questions
+                        .keys()
+                        .map(|name| {
+                            (
+                                name.clone(),
+                                json!({"type": "box", "box": null, "confidence": 0.0}),
+                            )
+                        })
+                        .collect();
+                    (map, tokens)
+                } else {
+                    let map = questions
+                        .keys()
+                        .map(|id| {
+                            let score = if matches!(id.as_str(), "tile_15" | "tile_16") {
+                                0.9
+                            } else {
+                                0.0
+                            };
+                            (id.clone(), json!({"type": "noul", "noul": score}))
+                        })
+                        .collect();
+                    (map, 5000)
+                };
+                let reply = json!({
+                    "model": "box-guard-v1",
+                    "answers": answers,
+                    "usage": {"input_tokens": input_tokens, "output_tokens": 0},
+                });
+                request.reply.send(reply.to_string()).unwrap();
+            }
+            assert_eq!(saw_box_reqs, expected_box_reqs);
+        });
+        let mut lab = LabProcess(
+            Command::new(env!("CARGO_BIN_EXE_hypercaptcha"))
+                .args([
+                    "serve",
+                    "--mode",
+                    "v2",
+                    "--port",
+                    "0",
+                    "--timeout",
+                    "10",
+                    "--model-config",
+                    config_file.0.to_str().unwrap(),
+                    "--effort",
+                    effort,
+                    "--box-wait",
+                ])
+                .env("RECAPTCHA_SITE_KEY", "test-site")
+                .env("RECAPTCHA_SECRET_KEY", "test-secret")
+                .env("BOX_GUARD_KEY", "secret-box")
+                .stdout(Stdio::piped())
+                .spawn()
+                .unwrap(),
+        );
+        let mut line = String::new();
+        BufReader::new(lab.0.stdout.take().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        let url = line.trim().strip_prefix("Open ").unwrap().to_string();
+        let reply: Value = Client::new()
+            .post(format!("{url}/model"))
+            .header("Origin", &url)
+            .json(&json!({
+                "trial_id": "box-guard",
+                "source": "chrome",
+                "layout": 4,
+                "prompt": "Select all squares with\nbicycles",
+                "image": image,
+            }))
+            .send()
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .unwrap();
+        server.join().unwrap();
+        assert_eq!(reply["result"]["status"], "answered");
+        assert_eq!(reply["result"]["prediction"]["value"], json!([15, 16]));
+        let err = reply["result"]["vllm_components"]["boxes"]["error"]
+            .as_str()
+            .unwrap();
+        let prefix = if underbill_windows {
+            "windows:"
+        } else {
+            "whole_grid:"
+        };
+        assert!(err.starts_with(prefix), "{err}");
+        assert!(err.contains("so they were not read"), "{err}");
+    }
+
+    // 3. Multi-state `windows` box request omits `options` when `return_meta = false` and
+    // enforces the combined 16-window patch-token floor when `min_patch_tokens = true`.
+    {
+        let (api_base, mock) = many_at_once();
+        let config_file = TempFile::write(
+            "custom-multistate-box-guard.toml",
+            &format!(
+                r#"
+schema_version = 1
+service = "recaptcha"
+name = "Custom/multistate-guard"
+provider = "custom"
+model_id = "ms-guard-v1"
+
+[endpoint]
+dialect = "systemone-assets"
+base_url = "{api_base}"
+api_key_env = "MS_GUARD_KEY"
+multi_state_windows = true
+supports_every_box = false
+return_meta = false
+min_patch_tokens = true
+
+[tuning]
+default_decision = "logistic"
+
+[tuning.logistic_4x4]
+weights = [0.223152, 1.092908, 0.213385, 0.18743, -1.509533]
+
+[tuning.efforts.low]
+close_ups = ["capture"]
+select_from = 0.5
+
+[tuning.efforts.medium]
+close_ups = ["capture"]
+select_from = 0.5
+
+[tuning.efforts.high]
+close_ups = ["capture"]
+select_from = 0.5
+
+[tuning.efforts.max]
+close_ups = ["capture"]
+select_from = 0.5
+
+[tuning.efforts.max.boxes]
+exempt_from = 0.99
+windows = 0.3
+cover = 0.01
+inside = 0.0
+"#
+            ),
+        );
+        let server = thread::spawn(move || {
+            let mut saw_multistate = 0;
+            // 2 vision checks + 1 whole + 4 close-ups + 1 multi-state windows box request.
+            for index in 0..2 + 1 + 4 + 1 {
+                let request = mock.recv_timeout(Duration::from_secs(10)).unwrap();
+                let body = &request.body;
+                assert!(body.get("options").is_none());
+                let reply = if index < 2 {
+                    json!({
+                        "model": "ms-guard-v1",
+                        "answers": {"red": {"type": "noul", "noul": if index == 0 { 0.99 } else { 0.01 }}},
+                        "usage": {"input_tokens": 5000, "output_tokens": 0},
+                    })
+                } else if body["states"].is_object() {
+                    saw_multistate += 1;
+                    let states: serde_json::Map<String, Value> = body["states"]
+                        .as_object()
+                        .unwrap()
+                        .keys()
+                        .map(|name| {
+                            (
+                                name.clone(),
+                                json!({"answers": {"q": {"type": "box", "box": null, "confidence": 0.0}}}),
+                            )
+                        })
+                        .collect();
+                    // 16 windows cost > 3,000 tokens combined, so 500 is under-billed.
+                    json!({
+                        "model": "ms-guard-v1",
+                        "states": states,
+                        "usage": {"input_tokens": 500, "output_tokens": 0},
+                    })
+                } else {
+                    let answers: serde_json::Map<String, Value> = body["questions"]
+                        .as_object()
+                        .unwrap()
+                        .keys()
+                        .map(|id| {
+                            let score = if matches!(id.as_str(), "tile_15" | "tile_16") {
+                                0.9
+                            } else {
+                                0.0
+                            };
+                            (id.clone(), json!({"type": "noul", "noul": score}))
+                        })
+                        .collect();
+                    json!({
+                        "model": "ms-guard-v1",
+                        "answers": answers,
+                        "usage": {"input_tokens": 5000, "output_tokens": 0},
+                    })
+                };
+                request.reply.send(reply.to_string()).unwrap();
+            }
+            assert_eq!(saw_multistate, 1);
+        });
+        let mut lab = LabProcess(
+            Command::new(env!("CARGO_BIN_EXE_hypercaptcha"))
+                .args([
+                    "serve",
+                    "--mode",
+                    "v2",
+                    "--port",
+                    "0",
+                    "--timeout",
+                    "10",
+                    "--model-config",
+                    config_file.0.to_str().unwrap(),
+                    "--effort",
+                    "max",
+                    "--box-wait",
+                ])
+                .env("RECAPTCHA_SITE_KEY", "test-site")
+                .env("RECAPTCHA_SECRET_KEY", "test-secret")
+                .env("MS_GUARD_KEY", "secret-ms")
+                .stdout(Stdio::piped())
+                .spawn()
+                .unwrap(),
+        );
+        let mut line = String::new();
+        BufReader::new(lab.0.stdout.take().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        let url = line.trim().strip_prefix("Open ").unwrap().to_string();
+        let reply: Value = Client::new()
+            .post(format!("{url}/model"))
+            .header("Origin", &url)
+            .json(&json!({
+                "trial_id": "ms-box-guard",
+                "source": "chrome",
+                "layout": 4,
+                "prompt": "Select all squares with\nbicycles",
+                "image": image,
+            }))
+            .send()
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .unwrap();
+        server.join().unwrap();
+        assert_eq!(reply["result"]["status"], "answered");
+        assert_eq!(reply["result"]["prediction"]["value"], json!([15, 16]));
+        let err = reply["result"]["vllm_components"]["boxes"]["error"]
+            .as_str()
+            .unwrap();
+        assert!(err.starts_with("windows:"), "{err}");
+        assert!(err.contains("so they were not read"), "{err}");
+    }
+}
+
+#[test]
+fn systemone_images_rejects_max_images_one_and_runs_with_max_images_two() {
+    // 1. max_images = 1 fails validation on startup for systemone-images.
+    let bad_cfg = TempFile::write(
+        "images-max-1.toml",
+        r#"
+schema_version = 1
+service = "recaptcha"
+name = "Custom/images-1"
+provider = "custom"
+model_id = "images-1"
+
+[endpoint]
+dialect = "systemone-images"
+base_url = "http://127.0.0.1:9/v1"
+api_key_env = "IMG_TEST_KEY"
+max_images = 1
+"#,
+    );
+    let output = Command::new(env!("CARGO_BIN_EXE_hypercaptcha"))
+        .args([
+            "serve",
+            "--mode",
+            "v2",
+            "--port",
+            "0",
+            "--model-config",
+            bad_cfg.0.to_str().unwrap(),
+        ])
+        .env("RECAPTCHA_SITE_KEY", "test-site")
+        .env("RECAPTCHA_SECRET_KEY", "test-secret")
+        .env("IMG_TEST_KEY", "secret")
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("endpoint.max_images must be at least 2 for systemone-images"),
+        "{stderr}"
+    );
+
+    // 2. max_images = 2 succeeds on 4×4 (16 close-up requests of 1 scene + 1 crop = 2 images).
+    let (api_base, mock) = many_at_once();
+    let ok_cfg = TempFile::write(
+        "images-max-2.toml",
+        &format!(
+            r#"
+schema_version = 1
+service = "recaptcha"
+name = "Custom/images-2"
+provider = "custom"
+model_id = "images-2"
+
+[endpoint]
+dialect = "systemone-images"
+base_url = "{api_base}"
+api_key_env = "IMG_TEST_KEY"
+max_images = 2
+"#
+        ),
+    );
+    let server = thread::spawn(move || {
+        // 2 vision checks + 1 whole grid + 16 close-up requests (1 crop + 1 scene each).
+        for index in 0..2 + 1 + 16 {
+            let request = mock.recv_timeout(Duration::from_secs(20)).unwrap();
+            let body = &request.body;
+            let images = body["images"].as_array().unwrap();
+            assert!(images.len() <= 2, "exceeded max_images=2: {}", images.len());
+            let questions = body["questions"].as_object().unwrap();
+            let answers: serde_json::Map<String, Value> = if index < 2 {
+                json!({"red": {"type": "noul", "noul": if index == 0 { 0.99 } else { 0.01 }}})
+                    .as_object()
+                    .unwrap()
+                    .clone()
+            } else {
+                questions
+                    .keys()
+                    .map(|id| {
+                        let score = if id == "tile_07" { 0.9 } else { 0.05 };
+                        (id.clone(), json!({"type": "noul", "noul": score}))
+                    })
+                    .collect()
+            };
+            let reply = json!({
+                "model": "images-2",
+                "answers": answers,
+                "usage": {"input_tokens": 5000, "output_tokens": 0},
+            });
+            request.reply.send(reply.to_string()).unwrap();
+        }
+    });
+    let mut lab = LabProcess(
+        Command::new(env!("CARGO_BIN_EXE_hypercaptcha"))
+            .args([
+                "serve",
+                "--mode",
+                "v2",
+                "--port",
+                "0",
+                "--timeout",
+                "10",
+                "--model-config",
+                ok_cfg.0.to_str().unwrap(),
+            ])
+            .env("RECAPTCHA_SITE_KEY", "test-site")
+            .env("RECAPTCHA_SECRET_KEY", "test-secret")
+            .env("IMG_TEST_KEY", "secret")
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    let mut line = String::new();
+    BufReader::new(lab.0.stdout.take().unwrap())
+        .read_line(&mut line)
+        .unwrap();
+    let url = line.trim().strip_prefix("Open ").unwrap().to_string();
+    let image = STANDARD.encode(
+        tiny_skia::Pixmap::new(320, 320)
+            .unwrap()
+            .encode_png()
+            .unwrap(),
+    );
+    let reply: Value = Client::new()
+        .post(format!("{url}/model"))
+        .header("Origin", &url)
+        .json(&json!({
+            "trial_id": "images-max-2",
+            "source": "chrome",
+            "layout": 4,
+            "prompt": "Select all squares with bicycles",
+            "image": image,
+        }))
+        .send()
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .unwrap();
+    server.join().unwrap();
+    assert_eq!(reply["result"]["status"], "answered");
+    assert_eq!(reply["result"]["prediction"]["value"], json!([7]));
+    assert_eq!(reply["result"]["decision_requests"], 17);
+}
+
+#[test]
+fn server_creates_nested_log_dirs_and_reports_all_model_flags() {
+    let root = std::env::temp_dir().join(format!(
+        "hypercaptcha-nested-log-test-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    let log_path = root.join("reports").join("nested").join("trials.jsonl");
+
+    let mut lab = LabProcess(
+        Command::new(env!("CARGO_BIN_EXE_hypercaptcha"))
+            .args([
+                "serve",
+                "--mode",
+                "v2",
+                "--google-test-key",
+                "--port",
+                "0",
+                "--log",
+                log_path.to_str().unwrap(),
+            ])
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    let mut line = String::new();
+    BufReader::new(lab.0.stdout.take().unwrap())
+        .read_line(&mut line)
+        .unwrap();
+    let url = line.trim().strip_prefix("Open ").unwrap().to_string();
+    assert!(log_path.is_file());
+
+    let client = Client::new();
+    for path in ["model", "vision-check"] {
+        let resp = client
+            .post(format!("{url}/{path}"))
+            .header("Origin", &url)
+            .json(&json!({"trial_id": "no-backend", "source": "browser"}))
+            .send()
+            .unwrap();
+        assert_eq!(resp.status(), 400);
+        let body: Value = resp.json().unwrap();
+        let error = body["error"].as_str().unwrap();
+        assert!(
+            error.contains("--provider")
+                && error.contains("--model")
+                && error.contains("--model-config"),
+            "{path}: {error}"
+        );
+    }
+
+    let recaptcha_js = client
+        .get(format!("{url}/lab.js"))
+        .send()
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .text()
+        .unwrap();
+    assert!(recaptcha_js.contains("--provider, --model, or --model-config"));
+    assert!(recaptcha_js.contains("challengeButton.disabled = false;"));
+    assert!(recaptcha_js.contains("let imageRounds = 0;"));
+    drop(lab);
+    let _ = std::fs::remove_dir_all(&root);
+
+    let mut hcap_lab = LabProcess(
+        Command::new(env!("CARGO_BIN_EXE_hypercaptcha"))
+            .args([
+                "serve",
+                "--captcha",
+                "hcaptcha",
+                "--hcaptcha-test-key",
+                "--port",
+                "0",
+            ])
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    let mut line = String::new();
+    BufReader::new(hcap_lab.0.stdout.take().unwrap())
+        .read_line(&mut line)
+        .unwrap();
+    let hcap_url = line.trim().strip_prefix("Open ").unwrap().to_string();
+    let port: u16 = hcap_url
+        .strip_prefix("http://hypercaptcha.localhost:")
+        .unwrap()
+        .parse()
+        .unwrap();
+    let hcap_client = Client::builder()
+        .resolve("hypercaptcha.localhost", ([127, 0, 0, 1], port).into())
+        .build()
+        .unwrap();
+    let hcap_js = hcap_client
+        .get(format!("{hcap_url}/lab.js"))
+        .send()
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .text()
+        .unwrap();
+    assert!(hcap_js.contains("--provider, --model, or --model-config"));
 }

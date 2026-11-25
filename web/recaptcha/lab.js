@@ -5,6 +5,8 @@ const next = byId("next");
 const scoreButton = byId("run-score");
 const challengeButton = byId("run-challenge");
 const imageForm = byId("image-form");
+const promptInput = byId("prompt");
+const layoutSelect = byId("layout");
 const observationForm = byId("observation-form");
 const parameters = new URLSearchParams(location.hash.slice(1));
 const requestedSource = parameters.get("source");
@@ -20,11 +22,17 @@ let verifying = false;
 let modelBusy = false;
 let googleDone = false;
 let started;
-let pointerMoves;
-let pointerDowns;
-let keyPresses;
-let focusChanges;
-let imageRounds;
+let pointerMoves = 0;
+let pointerDowns = 0;
+let keyPresses = 0;
+let focusChanges = 0;
+let imageRounds = 0;
+
+function syncPromptPlaceholder() {
+  promptInput.placeholder = layoutSelect.value === "4"
+    ? "Select all squares with traffic lights"
+    : "Select all images with bicycles";
+}
 
 function startTrial() {
   trialId = crypto.randomUUID();
@@ -47,6 +55,7 @@ function startTrial() {
     scoreButton.disabled = false;
     googleStatus.textContent = "Request an assessment to score this browser interaction.";
   } else if (policyChallenge) {
+    challengeButton.disabled = false;
     googleStatus.textContent = "Request a challenge with your Google policy key.";
   } else {
     if (widgetId !== undefined) widget.reset(widgetId);
@@ -75,6 +84,7 @@ async function post(path, fields) {
 async function verify(token) {
   if (verifying || googleDone) return;
   verifying = true;
+  if (policyChallenge) challengeButton.disabled = true;
   googleStatus.textContent = "Verifying with Google…";
   try {
     const result = await post("/verify", { token });
@@ -88,6 +98,7 @@ async function verify(token) {
   } finally {
     verifying = false;
     googleDone = true;
+    if (policyChallenge) challengeButton.disabled = false;
     next.hidden = false;
   }
 }
@@ -156,6 +167,8 @@ document.addEventListener("keydown", () => keyPresses++);
 window.addEventListener("focus", () => focusChanges++);
 window.addEventListener("blur", () => focusChanges++);
 
+layoutSelect.addEventListener("change", syncPromptPlaceholder);
+
 next.addEventListener("click", () => {
   if (verifying || modelBusy) return;
   if (policyChallenge) {
@@ -163,6 +176,7 @@ next.addEventListener("click", () => {
     return;
   }
   imageForm.reset();
+  syncPromptPlaceholder();
   startTrial();
 });
 
@@ -241,7 +255,8 @@ async function init() {
   byId("context").textContent = config.test ? "Google public test key · Integration smoke test" : "Live verification with your Google key";
   byId("model-info").textContent = config.provider
     ? `${config.provider} · ${config.model}`
-    : "Start the server with --provider to enable model requests.";
+    : "Start the server with --provider, --model, or --model-config to enable model requests.";
+  syncPromptPlaceholder();
   const vision = !config.score_based && !config.test && config.provider && config.provider !== "openai-completions";
   if (companionTrial) {
     document.body.classList.add("companion-only");
@@ -256,7 +271,21 @@ async function init() {
     challengeButton.dataset.sitekey = config.site_key;
     challengeButton.dataset.action = config.action;
     challengeButton.dataset.callback = "hypercaptchaChallengeComplete";
+    challengeButton.dataset.expiredCallback = "hypercaptchaChallengeExpired";
+    challengeButton.dataset.errorCallback = "hypercaptchaChallengeError";
     window.hypercaptchaChallengeComplete = verify;
+    window.hypercaptchaChallengeExpired = () => {
+      if (!googleDone) {
+        challengeButton.disabled = false;
+        googleStatus.textContent = "The challenge expired. Request a challenge again.";
+      }
+    };
+    window.hypercaptchaChallengeError = () => {
+      if (!googleDone) {
+        challengeButton.disabled = false;
+        googleStatus.textContent = "Google could not complete the challenge. Check the network or reload.";
+      }
+    };
     challengeButton.hidden = false;
     challengeButton.addEventListener("click", () => {
       if (googleDone || verifying) return;

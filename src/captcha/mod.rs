@@ -314,10 +314,16 @@ impl WireProfile {
                 "endpoint.extra_api_keys_env must be non-empty when set"
             );
         }
-        ensure!(
-            self.max_images >= 1,
-            "endpoint.max_images must be at least 1"
-        );
+        match self.dialect {
+            WireDialect::SystemOneImages => ensure!(
+                self.max_images >= 2,
+                "endpoint.max_images must be at least 2 for systemone-images"
+            ),
+            WireDialect::SystemOneAssets => ensure!(
+                self.max_images >= 1,
+                "endpoint.max_images must be at least 1"
+            ),
+        }
         for (name, value) in &self.extra_headers {
             HeaderName::from_bytes(name.as_bytes())
                 .with_context(|| format!("invalid endpoint.extra_headers name {name:?}"))?;
@@ -828,6 +834,84 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("max_images")
+        );
+
+        // max_images = 1 rejected for systemone-images (both custom and liquid default dialect).
+        let bad_custom_images_max = r#"
+            schema_version = 1
+            service = "recaptcha"
+            name = "Custom/images-1"
+            provider = "custom"
+            model_id = "test"
+
+            [endpoint]
+            dialect = "systemone-images"
+            base_url = "https://example.invalid/v1"
+            api_key_env = "TEST_KEY"
+            max_images = 1
+        "#;
+        let err = ModelConfig::from_toml(bad_custom_images_max)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("max_images") && err.contains("2"), "{err}");
+
+        let bad_liquid_max = r#"
+            schema_version = 1
+            service = "recaptcha"
+            name = "Liquid/max-1"
+            provider = "liquid"
+            model_id = "d1.2"
+
+            [endpoint]
+            max_images = 1
+        "#;
+        let err = ModelConfig::from_toml(bad_liquid_max)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("max_images") && err.contains("2"), "{err}");
+
+        // max_images = 2 is accepted for systemone-images, and max_images = 1 for systemone-assets.
+        let ok_images_2 = r#"
+            schema_version = 1
+            service = "recaptcha"
+            name = "Custom/images-2"
+            provider = "custom"
+            model_id = "test"
+
+            [endpoint]
+            dialect = "systemone-images"
+            base_url = "https://example.invalid/v1"
+            api_key_env = "TEST_KEY"
+            max_images = 2
+        "#;
+        assert_eq!(
+            ModelConfig::from_toml(ok_images_2)
+                .unwrap()
+                .into_model()
+                .unwrap()
+                .wire
+                .max_images,
+            2
+        );
+
+        let ok_assets_1 = r#"
+            schema_version = 1
+            service = "recaptcha"
+            name = "vLLM/assets-1"
+            provider = "vllm"
+            model_id = "test"
+
+            [endpoint]
+            max_images = 1
+        "#;
+        assert_eq!(
+            ModelConfig::from_toml(ok_assets_1)
+                .unwrap()
+                .into_model()
+                .unwrap()
+                .wire
+                .max_images,
+            1
         );
     }
 }

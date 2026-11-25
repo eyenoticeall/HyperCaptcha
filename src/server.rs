@@ -316,10 +316,9 @@ impl Lab {
     }
 
     fn check_vision(&mut self, request: &mut Request) -> Result<Value> {
-        let backend = self
-            .backend
-            .as_ref()
-            .context("Start the lab with a decision provider (--provider or --model-config).")?;
+        let backend = self.backend.as_ref().context(
+            "Start the lab with a decision provider (--provider, --model, or --model-config).",
+        )?;
         let trial: Trial = read_json(request)?;
         validate_id(&trial.trial_id)?;
         let start = Instant::now();
@@ -336,10 +335,9 @@ impl Lab {
     }
 
     fn predict(&mut self, request: &mut Request) -> Result<Value> {
-        let backend = self
-            .backend
-            .as_ref()
-            .context("Start the lab with --provider to call a model.")?;
+        let backend = self.backend.as_ref().context(
+            "Start the lab with --provider, --model, or --model-config to call a model.",
+        )?;
         let submission: ModelRequest = read_json(request)?;
         validate_id(&submission.trial_id)?;
         let mut grid_pixels = None;
@@ -642,6 +640,13 @@ fn decision_vision_result(backend: &Backend) -> Value {
 }
 
 fn open_log(path: &Path) -> Result<File> {
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("could not create log directory {}", parent.display()))?;
+    }
     OpenOptions::new()
         .create(true)
         .append(true)
@@ -778,4 +783,25 @@ fn json_response(status: u16, result: Value) -> (u16, String, &'static str) {
         result.to_string(),
         "application/json; charset=utf-8",
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn open_log_creates_missing_parent_directories() {
+        let root =
+            std::env::temp_dir().join(format!("hypercaptcha-open-log-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let log_path = root.join("nested").join("reports").join("trials.jsonl");
+        let mut file = open_log(&log_path).unwrap();
+        writeln!(file, "{{\"ok\":true}}").unwrap();
+        drop(file);
+        assert_eq!(
+            std::fs::read_to_string(&log_path).unwrap(),
+            "{\"ok\":true}\n"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }

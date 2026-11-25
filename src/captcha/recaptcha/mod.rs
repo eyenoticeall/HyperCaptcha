@@ -40,7 +40,7 @@ pub static PROFILE: Profile = Profile {
 };
 
 /// The object named on the second line of "Select all images with" or "Select all squares
-/// with".
+/// with", falling back to a single-line prompt when no newline is present.
 fn challenge_target(prompt: &str, side: u8) -> Option<&str> {
     let mut lines = prompt.lines();
     let instruction = lines.next()?.trim();
@@ -50,13 +50,26 @@ fn challenge_target(prompt: &str, side: u8) -> Option<&str> {
         _ => return None,
     };
     let suffix = instruction.strip_prefix(prefix)?;
-    if !["", " a", " an"].contains(&suffix) {
+    if ["", " a", " an"].contains(&suffix) {
+        return lines
+            .next()
+            .map(str::trim)
+            .filter(|target| !target.is_empty());
+    }
+    if prompt.contains(['\n', '\r']) {
         return None;
     }
-    lines
-        .next()
-        .map(str::trim)
-        .filter(|target| !target.is_empty())
+    let rest = suffix.strip_prefix(char::is_whitespace)?.trim_start();
+    let target = ["a", "an"]
+        .into_iter()
+        .find_map(|article| {
+            rest.strip_prefix(article)?
+                .strip_prefix(char::is_whitespace)
+        })
+        .unwrap_or(rest)
+        .trim()
+        .trim_end_matches('.');
+    (!target.is_empty()).then_some(target)
 }
 
 /// Whether the challenge text offers skipping, as in "If there are none, click skip".
@@ -383,6 +396,97 @@ mod tests {
             let result = validate(verdict, Mode::PolicyChallenge, Some("localhost"));
             assert_eq!(result.valid, expected);
             assert_eq!(result.challenge.as_deref(), Some(challenge));
+        }
+    }
+
+    #[test]
+    fn challenge_target_supports_multiline_and_single_line_prompts() {
+        // Standard multi-line reCAPTCHA prompts keep top priority.
+        assert_eq!(
+            challenge_target("Select all images with\nbicycles", 3),
+            Some("bicycles")
+        );
+        assert_eq!(
+            challenge_target("Select all images with a\nfire hydrant", 3),
+            Some("fire hydrant")
+        );
+        assert_eq!(
+            challenge_target("Select all images with an\nairplane", 3),
+            Some("airplane")
+        );
+        assert_eq!(
+            challenge_target(
+                "Select all squares with\ntraffic lights\nIf there are none, click skip",
+                4
+            ),
+            Some("traffic lights")
+        );
+        assert!(allows_skipping(
+            "Select all squares with\ntraffic lights\nIf there are none, click skip"
+        ));
+
+        // Single-line manual web UI fallback when no newline is present.
+        assert_eq!(
+            challenge_target("Select all images with bicycles", 3),
+            Some("bicycles")
+        );
+        assert_eq!(
+            challenge_target("Select all images with bicycles.", 3),
+            Some("bicycles")
+        );
+        assert_eq!(
+            challenge_target("Select all images with a fire hydrant", 3),
+            Some("fire hydrant")
+        );
+        assert_eq!(
+            challenge_target("Select all images with an airplane", 3),
+            Some("airplane")
+        );
+        assert_eq!(
+            challenge_target("Select all images with apples", 3),
+            Some("apples")
+        );
+        assert_eq!(
+            challenge_target("Select all images with antlers", 3),
+            Some("antlers")
+        );
+        assert_eq!(
+            challenge_target("Select all squares with traffic lights", 4),
+            Some("traffic lights")
+        );
+        assert_eq!(
+            challenge_target("Select all squares with a bus.", 4),
+            Some("bus")
+        );
+
+        // Reject missing/empty targets, mismatched layouts, non-whitespace suffixes, and
+        // multi-line prompts whose first line is not the exact prefix.
+        for (prompt, side) in [
+            ("", 3),
+            ("Select all images with", 3),
+            ("Select all images with   ", 3),
+            ("Select all images with a", 3),
+            ("Select all images with an", 3),
+            ("Select all images with .", 3),
+            ("Select all images with a .", 3),
+            ("Select all images with\n", 3),
+            ("Select all images with\n   \nClick verify", 3),
+            ("Select all images without bicycles", 3),
+            ("Select all bicycles", 3),
+            ("Select all images with bicycles", 4),
+            ("Select all squares with traffic lights", 3),
+            ("Select all images with bicycles\ncars", 3),
+            (
+                "Select all squares with traffic lights\nIf there are none, click skip",
+                4,
+            ),
+            ("Select all images with\nbicycles", 5),
+        ] {
+            assert_eq!(
+                challenge_target(prompt, side),
+                None,
+                "expected None for ({prompt:?}, {side})"
+            );
         }
     }
 }

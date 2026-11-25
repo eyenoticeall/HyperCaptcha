@@ -93,7 +93,7 @@ async function init() {
     : "Live verification with your hCaptcha key";
   byId("model-info").textContent = config.provider
     ? `${config.provider} · ${config.model}`
-    : "Start the server with --provider to enable model requests.";
+    : "Start the server with --provider, --model, or --model-config to enable model requests.";
   await loadHcaptcha();
   startTrial();
   widgetId = window.hcaptcha.render("widget", {

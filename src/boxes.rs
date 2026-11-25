@@ -176,14 +176,30 @@ struct WholeRequest<'a> {
     #[serde(flatten)]
     state: State,
     model: &'a str,
-    options: Options,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    options: Option<Options>,
 }
 
 #[derive(Serialize)]
 struct WindowsRequest<'a> {
     states: Ordered<String, State>,
     model: &'a str,
-    options: Options,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    options: Option<Options>,
+}
+
+/// An encoded box request and the fewest input tokens its pictures cost.
+pub struct BoxPayload {
+    pub json: Vec<u8>,
+    pub patch_tokens: u64,
+}
+
+fn request_options(return_meta: bool) -> Option<Options> {
+    return_meta.then_some(Options { return_meta: true })
+}
+
+fn picture_patch_tokens(pic: &Rgb) -> u64 {
+    crate::liquid::patch_tokens(pic.width as u32, pic.height as u32)
 }
 
 fn ask_for_box(instructions: String) -> Question {
@@ -195,12 +211,19 @@ fn ask_for_box(instructions: String) -> Question {
 }
 
 /// The request for nine boxes on the whole grid, as JSON.
-pub fn whole_request(model: &str, target: &str, grid: &Rgb) -> Result<Vec<u8>> {
+pub fn whole_request(
+    model: &str,
+    target: &str,
+    grid: &Rgb,
+    return_meta: bool,
+) -> Result<BoxPayload> {
     let one = singular(target);
+    let pic = picture(grid, [0.0, 0.0, 1.0, 1.0], WHOLE_SIDE);
+    let patch_tokens = picture_patch_tokens(&pic);
     let request = WholeRequest {
         state: State {
             state: format!("A street photo. Locate the {target}."),
-            images: [data_url(&picture(grid, [0.0, 0.0, 1.0, 1.0], WHOLE_SIDE))],
+            images: [data_url(&pic)],
             questions: Ordered(
                 WHOLE_QUESTIONS
                     .iter()
@@ -211,18 +234,26 @@ pub fn whole_request(model: &str, target: &str, grid: &Rgb) -> Result<Vec<u8>> {
             ),
         },
         model,
-        options: Options { return_meta: true },
+        options: request_options(return_meta),
     };
-    serde_json::to_vec(&request).context("encode the whole-grid box request")
+    let json = serde_json::to_vec(&request).context("encode the whole-grid box request")?;
+    Ok(BoxPayload { json, patch_tokens })
 }
 
 /// The request for a box around every instance on the whole grid, as JSON: the nine-box
 /// request's picture and state with one question. Only Liquid's models answer its type.
-pub fn every_request(model: &str, target: &str, grid: &Rgb) -> Result<Vec<u8>> {
+pub fn every_request(
+    model: &str,
+    target: &str,
+    grid: &Rgb,
+    return_meta: bool,
+) -> Result<BoxPayload> {
+    let pic = picture(grid, [0.0, 0.0, 1.0, 1.0], WHOLE_SIDE);
+    let patch_tokens = picture_patch_tokens(&pic);
     let request = WholeRequest {
         state: State {
             state: format!("A street photo. Locate the {target}."),
-            images: [data_url(&picture(grid, [0.0, 0.0, 1.0, 1.0], WHOLE_SIDE))],
+            images: [data_url(&pic)],
             questions: Ordered(vec![(
                 EVERY_QUESTION,
                 Question {
@@ -233,23 +264,26 @@ pub fn every_request(model: &str, target: &str, grid: &Rgb) -> Result<Vec<u8>> {
             )]),
         },
         model,
-        options: Options { return_meta: true },
+        options: request_options(return_meta),
     };
-    serde_json::to_vec(&request).context("encode the every-instance box request")
+    let json = serde_json::to_vec(&request).context("encode the every-instance box request")?;
+    Ok(BoxPayload { json, patch_tokens })
 }
 
 /// How many windows a grid has: one around each square.
 pub const WINDOWS: u8 = SIDE * SIDE;
 
-/// Each window's name, picture and question.
-fn window_states(target: &str, grid: &Rgb) -> Vec<(String, State)> {
+/// Each window's name, picture, question, and patch-token floor.
+fn window_states(target: &str, grid: &Rgb) -> Vec<(String, State, u64)> {
     let one = singular(target);
     (1..=WINDOWS)
         .map(|tile| {
             let place = place_in_window(tile);
+            let pic = picture(grid, window(tile), WINDOW_SIDE);
+            let patch_tokens = picture_patch_tokens(&pic);
             let state = State {
                 state: format!("Part of a street photo. Target: {target}."),
-                images: [data_url(&picture(grid, window(tile), WINDOW_SIDE))],
+                images: [data_url(&pic)],
                 questions: Ordered(vec![(
                     WINDOW_QUESTION,
                     ask_for_box(format!(
@@ -257,35 +291,54 @@ fn window_states(target: &str, grid: &Rgb) -> Vec<(String, State)> {
                     )),
                 )]),
             };
-            (format!("s{tile:02}"), state)
+            (format!("s{tile:02}"), state, patch_tokens)
         })
         .collect()
 }
 
 /// The request for one box in each of the sixteen windows, as JSON. The windows travel
 /// together: d3-ultra answers a window differently when it shares a request with fewer others.
-pub fn windows_request(model: &str, target: &str, grid: &Rgb) -> Result<Vec<u8>> {
+pub fn windows_request(
+    model: &str,
+    target: &str,
+    grid: &Rgb,
+    return_meta: bool,
+) -> Result<BoxPayload> {
+    let mut patch_tokens = 0u64;
+    let states = window_states(target, grid)
+        .into_iter()
+        .map(|(name, state, tokens)| {
+            patch_tokens += tokens;
+            (name, state)
+        })
+        .collect();
     let request = WindowsRequest {
-        states: Ordered(window_states(target, grid)),
+        states: Ordered(states),
         model,
-        options: Options { return_meta: true },
+        options: request_options(return_meta),
     };
-    serde_json::to_vec(&request).context("encode the window box request")
+    let json = serde_json::to_vec(&request).context("encode the window box request")?;
+    Ok(BoxPayload { json, patch_tokens })
 }
 
 /// The same sixteen windows as a request each, with the window's name, for a provider whose
 /// requests hold one state.
-pub fn window_requests(model: &str, target: &str, grid: &Rgb) -> Result<Vec<(String, Vec<u8>)>> {
+pub fn window_requests(
+    model: &str,
+    target: &str,
+    grid: &Rgb,
+    return_meta: bool,
+) -> Result<Vec<(String, BoxPayload)>> {
     window_states(target, grid)
         .into_iter()
-        .map(|(name, state)| {
+        .map(|(name, state, patch_tokens)| {
             let request = WholeRequest {
                 state,
                 model,
-                options: Options { return_meta: true },
+                options: request_options(return_meta),
             };
             let json = serde_json::to_vec(&request).context("encode a window's box request")?;
-            Ok((name, json))
+            Ok((name, BoxPayload { json, patch_tokens }))
         })
         .collect()
 }
@@ -545,7 +598,9 @@ mod tests {
             height: 16,
             data: vec![90; 16 * 16 * 3],
         };
-        let whole = String::from_utf8(whole_request("m", "buses", &grid).unwrap()).unwrap();
+        let whole_payload = whole_request("m", "buses", &grid, true).unwrap();
+        assert_eq!(whole_payload.patch_tokens, 938);
+        let whole = String::from_utf8(whole_payload.json).unwrap();
         assert!(whole.starts_with(
             r#"{"state":"A street photo. Locate the buses.","images":["data:image/jpeg;base64,"#
         ));
@@ -563,13 +618,42 @@ mod tests {
         ));
         assert!(whole.ends_with(r#""model":"m","options":{"return_meta":true}}"#));
 
-        let windows = String::from_utf8(windows_request("m", "stairs", &grid).unwrap()).unwrap();
+        let whole_no_meta =
+            String::from_utf8(whole_request("m", "buses", &grid, false).unwrap().json).unwrap();
+        assert!(whole_no_meta.ends_with(r#""model":"m"}"#));
+        assert!(!whole_no_meta.contains("return_meta"));
+
+        let windows_payload = windows_request("m", "stairs", &grid, true).unwrap();
+        assert!(windows_payload.patch_tokens > 0);
+        let windows = String::from_utf8(windows_payload.json).unwrap();
         assert!(windows.starts_with(
             r#"{"states":{"s01":{"state":"Part of a street photo. Target: stairs.","images":["data:image/jpeg;base64,"#
         ));
         assert!(windows.contains(r#""questions":{"q":{"type":"box","instructions":"the set of stairs in the top left of the image, including every visible part of it"}}}"#));
         assert_eq!(windows.matches(r#""state":"Part of"#).count(), 16);
         assert!(windows.find(r#""s02":"#).unwrap() < windows.find(r#""s16":"#).unwrap());
+        assert!(windows.ends_with(r#""model":"m","options":{"return_meta":true}}"#));
+
+        let windows_no_meta =
+            String::from_utf8(windows_request("m", "stairs", &grid, false).unwrap().json).unwrap();
+        assert!(windows_no_meta.ends_with(r#""model":"m"}"#));
+        assert!(!windows_no_meta.contains("return_meta"));
+
+        let single_windows = window_requests("m", "stairs", &grid, false).unwrap();
+        assert_eq!(single_windows.len(), 16);
+        assert_eq!(
+            single_windows
+                .iter()
+                .map(|(_, payload)| payload.patch_tokens)
+                .sum::<u64>(),
+            windows_payload.patch_tokens
+        );
+        for (_, payload) in &single_windows {
+            let text = String::from_utf8(payload.json.clone()).unwrap();
+            assert!(text.ends_with(r#""model":"m"}"#));
+            assert!(!text.contains("return_meta"));
+            assert!(payload.patch_tokens > 0);
+        }
     }
 
     #[test]
@@ -579,8 +663,11 @@ mod tests {
             height: 16,
             data: vec![90; 16 * 16 * 3],
         };
-        let whole = String::from_utf8(whole_request("m", "stairs", &grid).unwrap()).unwrap();
-        let every = String::from_utf8(every_request("m", "stairs", &grid).unwrap()).unwrap();
+        let whole_payload = whole_request("m", "stairs", &grid, true).unwrap();
+        let every_payload = every_request("m", "stairs", &grid, true).unwrap();
+        assert_eq!(every_payload.patch_tokens, whole_payload.patch_tokens);
+        let whole = String::from_utf8(whole_payload.json).unwrap();
+        let every = String::from_utf8(every_payload.json).unwrap();
         // The same state and picture as the nine-box request, then the one question.
         let questions = r#""],"questions":{"#;
         let shared = whole.find(questions).unwrap() + questions.len();
@@ -589,9 +676,16 @@ mod tests {
             &every[shared..],
             r#""q":{"type":"boxes","instructions":"every set of stairs","max":16}},"model":"m","options":{"return_meta":true}}"#
         );
+        let every_no_meta =
+            String::from_utf8(every_request("m", "stairs", &grid, false).unwrap().json).unwrap();
+        assert_eq!(
+            &every_no_meta[shared..],
+            r#""q":{"type":"boxes","instructions":"every set of stairs","max":16}},"model":"m"}"#
+        );
         // No other question says how many boxes to draw.
         assert!(!whole.contains("max"));
-        let windows = String::from_utf8(windows_request("m", "stairs", &grid).unwrap()).unwrap();
+        let windows =
+            String::from_utf8(windows_request("m", "stairs", &grid, true).unwrap().json).unwrap();
         assert!(!windows.contains("max"));
     }
 
