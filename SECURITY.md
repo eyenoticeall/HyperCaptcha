@@ -4,7 +4,7 @@
 
 HyperCaptcha is a localhost-only browser and model evaluation harness intended for empirical research on visual decision models, calibration, latency, and verification behavior.
 
-- **Localhost-only lab**: The harness serves its own local HTML test pages (`web/recaptcha/`, `web/hcaptcha/`) on loopback (`127.0.0.1` / `localhost`) using either researcher-owned CAPTCHA site/secret keys or official vendor test keys (`--test-keys`).
+- **Localhost-only lab**: The harness serves its own local HTML test pages (`web/recaptcha/`, `web/hcaptcha/`) on loopback (`127.0.0.1` / `localhost`) using either researcher-owned CAPTCHA site/secret keys or official vendor test keys (`--google-test-key` / `--hcaptcha-test-key`).
 - **No third-party targeting**: Do not use this repository to target, automate against, or bypass protections on third-party websites or services you do not own or have explicit written authorization to test.
 - **Authorized experimentation**: Users are responsible for complying with the terms of service of their CAPTCHA providers, model APIs, and applicable laws.
 

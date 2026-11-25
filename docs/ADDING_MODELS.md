@@ -130,8 +130,8 @@ MY_DECISION_API_KEY=... cargo run --release --locked -- serve \
 | `image_format` | string | `"jpeg"` | `"jpeg"` (q90) or `"png"` for scoring requests (box requests always use byte-exact Pillow JPEG q90). |
 | `crop_filter` | string | `"bilinear"` | `"bilinear"` or `"nearest"` resampling for 4×4 tile close-ups. |
 | `gzip` | bool | `false` | Gzip-compress JSON request bodies (`Content-Encoding: gzip`). Set `false` for endpoints that reject compressed bodies. |
-| `max_images` | int (`>= 1`) | `16` | Maximum pictures allowed in a single request (`8` for Liquid-style endpoints). Automatically caps close-ups per batch to `max_images - 1`. |
-| `multi_state_windows` | bool | `true` | `true` packs all 16 window box queries into one multi-state request; `false` sends 16 parallel single-state requests. |
+| `max_images` | int (`>= 1`) | `16` (`systemone-assets`) / `8` (`systemone-images`) | Maximum pictures allowed in a single request (`8` for Liquid-style endpoints). Automatically caps close-ups per batch to `max_images - 1`. |
+| `multi_state_windows` | bool | `true` (`systemone-assets`) / `false` (`systemone-images`) | `true` packs all 16 window box queries into one multi-state request; `false` sends 16 parallel single-state requests. |
 | `supports_every_box` | bool | `false` | `true` enables the single-question `type = "boxes"` multi-instance query (`boxes.every`). Rust rejects configs that set `boxes.every` while `supports_every_box = false`. |
 | `return_meta` | bool | `false` | Sends `options.return_meta = true` to collect provider queue/compute timings in `provider_meta`. |
 | `hedge_on_stall` | bool | `false` | Enables hedged duplicate requests at `1.5 s`, `4.0 s`, and `8.0 s`. **Only enable for deterministic models**; disable for stochastic models. |
@@ -302,7 +302,7 @@ uv run hypercaptcha-eval summarize reports/my-model-live/trials.jsonl \
 
 If a decision-model provider does not speak either `systemone-assets` or `systemone-images` (for example, a proprietary JSON payload or multimodal logprob format):
 
-1. **Extend `WireDialect` in `src/captcha/mod.rs`:** Add a new enum variant with its kebab-case `#[serde(rename = "...")]` name (and update `VALID_DIALECTS` in `eval/export.py` if exporting configs from Python).
+1. **Extend `WireDialect` in `src/captcha/mod.rs`:** Add a new enum variant with its kebab-case `#[serde(rename = "...")]` name (and update `VALID_DIALECTS` in `eval/schema.py` if exporting configs from Python).
 2. **Add a clean dialect adapter module:** Follow `src/liquid.rs` as a template — keep wire translation and any response sanity checks (such as token-floor guards) isolated in a dedicated module with thorough unit tests.
 3. **Dispatch on `WireProfile.dialect` in `src/providers.rs`:** Handle encoding and response decoding for `/vision-check`, whole-grid & close-up scoring, skip presence queries, and box queries without adding `provider == ...` special cases.
 4. **Add mock-server integration tests in `tests/model_routes.rs`:** Exercise the new dialect end-to-end against a local mock HTTP server (`GET /config`, `POST /vision-check`, `POST /model`, and effort-level execution) and run `cargo test --locked`.
