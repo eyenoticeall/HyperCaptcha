@@ -2,8 +2,8 @@
 
 HyperCaptcha consists of two cleanly separated subsystems connected by a shared declarative TOML model contract (`schema_version = 1`) and image-free parity fixtures (`tests/fixtures/*.json.gz`):
 
-1. **Rust Localhost Lab & Decision Engine (`src/`, `models/`, `web/`)** — serves local CAPTCHA test pages (`hypercaptcha serve`, with opt-in `--env-file`), inspects/validates configs offline (`hypercaptcha models`, `hypercaptcha validate-config`), verifies tokens with Google reCAPTCHA or hCaptcha, orchestrates parallel multi-view & box-veto requests, and logs structured JSONL records.
-2. **Python Browser Runners (`scripts/`) & Offline Evaluation Toolkit (`eval/`)** — drives Camoufox trials (`scripts/recaptcha_lab.py`, `scripts/hcaptcha_lab.py`, shared `scripts/_common.py`) against the localhost server, builds deduplicated datasets, serves a local labeling UI, records raw model outputs, fits/sweeps rules, and exports validated TOML configs and parity fixtures.
+1. **Rust Localhost Lab & Decision Engine (`src/`, `models/`, `web/`):** Serves local CAPTCHA test pages (`hypercaptcha serve`, with opt-in `--env-file`), inspects/validates configs offline (`hypercaptcha models`, `hypercaptcha validate-config`), verifies tokens with Google reCAPTCHA or hCaptcha, orchestrates parallel multi-view & box-veto requests, and logs structured JSONL records.
+2. **Python Browser Runners (`scripts/`) & Offline Evaluation Toolkit (`eval/`):** Drives Camoufox trials (`scripts/recaptcha_lab.py`, `scripts/hcaptcha_lab.py`, shared `scripts/_common.py`) against the localhost server, builds deduplicated datasets, serves a local labeling UI, records raw model outputs, fits/sweeps rules, and exports validated TOML configs and parity fixtures.
 
 ```mermaid
 flowchart LR
@@ -13,7 +13,7 @@ flowchart LR
     Pipeline["Decision Pipeline (providers, plan, boxes, pillow, liquid)"]
     Models["Model APIs (vLLM, Liquid, Jev, Custom, OpenAI)"]
     Toml["Declarative Model Configs (models/**/*.toml)"]
-    Eval["Python Eval Toolkit (eval/* — hypercaptcha-eval)"]
+    Eval["Python Eval Toolkit (eval/*, hypercaptcha-eval)"]
     Fixtures["Parity Fixtures (tests/fixtures/*.json.gz)"]
 
     Browser <-->|"GET /, /config; POST /model, /verify, /vision-check, /pictures, /observe"| Server
@@ -131,7 +131,7 @@ Endpoints using the `systemone-images` dialect (such as Liquid's Decisions API) 
 
 1. **Positional image references:** Named `assets` are ignored without returning an error (causing the API to answer from text alone at ~51 tokens). `src/liquid.rs` strips `assets`, discovers image references in deterministic first-mention order (`state`, then `questions`), encodes them into an ordered `images` array of `data:image/<fmt>;base64,...` URLs, and rewrites every reference to `"image N"` (under object keys) or `"PHOTO is image N."` (inside instruction lists).
 2. **Per-request image & state caps:** Enforces `max_images` (e.g., `8` for Liquid) and pairs with `multi_state_windows = false` so 16 window box queries fan out as 16 single-state requests.
-3. **Patch-token billing floor (`min_patch_tokens`):** Computes `ceil(1.5 * ceil(width / 32) * ceil(height / 32))` for each attached image and rejects any response whose billed input tokens fall below that sum — turning silent image-drop regressions into hard errors.
+3. **Patch-token billing floor (`min_patch_tokens`):** Computes `ceil(1.5 * ceil(width / 32) * ceil(height / 32))` for each attached image and rejects any response whose billed input tokens fall below that sum, turning silent image-drop regressions into hard errors.
 
 ---
 
@@ -141,7 +141,7 @@ hCaptcha draws all 9 pictures onto a single HTML `<canvas>` with slight per-tile
 
 1. **Panel color discovery:** Finds up to `4` distinct near-grey background candidates (`high - low <= 8`, `low >= 150`) plus edge colors (`PANEL_TOLERANCE = 12`, `EDGE_TOLERANCE = 6`) to classify flat panel pixels.
 2. **Block localization:** Finds the longest contiguous stretch of columns and rows with `>= 15%` non-flat pixels (`PICTURE_SHARE = 0.15`), bridging narrow internal gaps (`5%` of width) and rejecting tiny noise runs (`< 4%`). Requires a near-square block (`aspect >= 0.80`) covering at least `45%` of the shorter screenshot side.
-3. **Gutter validation (grid vs. non-grid discrimination):** Divides the block into thirds vertically and horizontally and searches narrow bands around the `1/3` and `2/3` lines. Accepts the screenshot as a 3×3 grid only if every gutter is at least `45%` flat panel (`GAP_SHARE = 0.45`) and the mean gutter flatness exceeds lines through tile centers by at least `0.20` (`GAP_OVER_MIDDLE = 0.20`) — rejecting single-image drag/point/motion challenges.
+3. **Gutter validation (grid vs. non-grid discrimination):** Divides the block into thirds vertically and horizontally and searches narrow bands around the `1/3` and `2/3` lines. Accepts the screenshot as a 3×3 grid only if every gutter is at least `45%` flat panel (`GAP_SHARE = 0.45`) and the mean gutter flatness exceeds lines through tile centers by at least `0.20` (`GAP_OVER_MIDDLE = 0.20`), rejecting single-image drag/point/motion challenges.
 4. **Composition:** Crops the 9 places and arranges them edge-to-edge into a clean square PNG (`tile side` clamped to `64–256` px), returning the normalized bounding boxes (`pictures`) so `scripts/hcaptcha_lab.py` clicks the center of each selected tile on the original canvas.
 
 ---

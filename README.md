@@ -1,10 +1,10 @@
 <p align="center">
-  <img src="docs/assets/banner.png" alt="HyperCaptcha — Open-source research harness for multimodal CAPTCHA evaluation" width="100%" />
+  <img src="docs/assets/banner.png" alt="HyperCaptcha: Open-source research harness for multimodal CAPTCHA evaluation" width="100%" />
 </p>
 
 # HyperCaptcha
 
-**HyperCaptcha** is an open-source Rust and Python harness for solving and benchmarking **Google reCAPTCHA** and **hCaptcha** challenges with multimodal decision models — live in Camoufox or offline on saved grids with `hypercaptcha-eval`.
+**HyperCaptcha** is an open-source Rust and Python harness for solving and benchmarking **Google reCAPTCHA** and **hCaptcha** challenges with multimodal decision models, live in Camoufox or offline on saved grids with `hypercaptcha-eval`.
 
 > **Research use only:** HyperCaptcha is built for research and should not be used on third-party sites without permission. See [SECURITY.md](SECURITY.md) · [Apache-2.0](LICENSE).
 
@@ -12,13 +12,13 @@
 
 ## How the Harness Makes Selections
 
-Asking a vision model once on a raw screenshot leaves accuracy on the table — edge fragments get missed, background objects trigger false clicks, and small differences in image resizing shift borderline tiles. HyperCaptcha drives decision models with five concrete techniques:
+Asking a vision model once on a raw screenshot leaves accuracy on the table: edge fragments get missed, background objects trigger false clicks, and small differences in image resizing shift borderline tiles. HyperCaptcha drives decision models with five concrete techniques:
 
 - **Multi-view tile scoring (whole grid + close-ups):** Every square is scored on the full grid for scene context and again in zoomed close-up crops for fine details (such as distant wheel edges or signal housings). On 4×4 grids at `--effort high` and `max`, close-ups are run at two resolutions (capture size + `506 px`) and averaged in log-odds.
-- **Neighbor-aware logistic scoring:** Instead of a naive 50/50 average, a fitted logistic rule combines each square's whole-grid score, close-up score, and strongest edge-adjacent neighbor scores — capturing continuity when a single object (like a bus or traffic light) spans adjacent 4×4 tiles.
+- **Neighbor-aware logistic scoring:** Instead of a naive 50/50 average, a fitted logistic rule combines each square's whole-grid score, close-up score, and strongest edge-adjacent neighbor scores, capturing continuity when a single object (like a bus or traffic light) spans adjacent 4×4 tiles.
 - **Skip-grid presence gate:** On skippable 4×4 challenges (*"If there are none, click skip"*), a parallel presence query checks whether the target exists anywhere on the grid before selecting tiles.
 - **Bounding-box verification (veto, not rescue):** At `--effort medium` and above, the harness asks the model to locate target instances with bounding boxes (up to 9 whole-grid boxes on `vLLM`, a single multi-instance query on `Liquid`, plus 16 zoomed per-tile windows at `max`). High-confidence picks (`≥ 95.3%` on `d3-ultra`) pass automatically; lower-confidence picks are dropped unless a confident box reaches into that square.
-- **Early-tile inference & reproducible preprocessing:** On dynamic 3×3 grids, replacement tiles are composited and scored as soon as they are fetched — ahead of the widget's reveal timer. Parallel crop batching, connection warming, hedged retries, and byte-exact Pillow/libjpeg encoding (`src/pillow.rs`) keep latency low and offline replays identical to live runs.
+- **Early-tile inference & reproducible preprocessing:** On dynamic 3×3 grids, replacement tiles are composited and scored ahead of the widget's reveal timer as soon as they are fetched. Parallel crop batching, connection warming, hedged retries, and byte-exact Pillow/libjpeg encoding (`src/pillow.rs`) keep latency low and offline replays identical to live runs.
 
 ---
 
@@ -27,10 +27,10 @@ Asking a vision model once on a raw screenshot leaves accuracy on the table — 
 On 4×4 image-grid CAPTCHAs (*"Select all squares with traffic lights"*), a grid counts as **solved** only when every target square is selected and no empty square is clicked.
 
 HyperCaptcha lets you dial how much work the harness asks a model to do on each 4×4 grid via `--effort`:
-- **`low`** — Whole grid + 1 close-up pass + skip check (`6` requests)
-- **`medium`** — Adds whole-grid bounding-box verification to drop false positives (`7` requests)
-- **`high`** *(default)* — Adds a 2nd close-up pass at capture resolution (`11` requests)
-- **`max`** — Adds 16 zoomed per-tile window box checks (`12` requests)
+- **`low`**: Whole grid + 1 close-up pass + skip check (`6` requests)
+- **`medium`**: Adds whole-grid bounding-box verification to drop false positives (`7` requests)
+- **`high`** *(default)*: Adds a 2nd close-up pass at capture resolution (`11` requests)
+- **`max`**: Adds 16 zoomed per-tile window box checks (`12` requests)
 
 <p align="center">
   <img src="docs/assets/results-model-comparison.png" alt="How vLLM/d3-ultra across effort levels compares against Liquid/d1.2-ultra and typesafe/Jev inside the HyperCaptcha harness" width="100%" />
@@ -46,7 +46,7 @@ HyperCaptcha lets you dial how much work the harness asks a model to do on each 
   <img src="docs/assets/example-model-selections.png" alt="Side-by-side comparison of real recorded tile selections from vLLM/d3-ultra, Liquid/d1.2-ultra, and typesafe/Jev on identical 4x4 reCAPTCHA traffic-light and motorcycle grids" width="100%" />
 </p>
 
-- **Why `--effort high` is the default:** Inside HyperCaptcha, `vLLM/d3-ultra` at `high` solves **`82.9%` (`281/339`)** of 4×4 test grids — within 1 grid of `max` (`83.2%`, `282/339`) while using **`4,404` fewer input tokens** and cutting median provider compute wait roughly in half (**`282 ms`** vs. **`556 ms`**).
+- **Why `--effort high` is the default:** Inside HyperCaptcha, `vLLM/d3-ultra` at `high` solves **`82.9%` (`281/339`)** of 4×4 test grids, within 1 grid of `max` (`83.2%`, `282/339`), while using **`4,404` fewer input tokens** and cutting median provider compute wait roughly in half (**`282 ms`** vs. **`556 ms`**).
 - **Comparing decision models in the harness:** `Liquid/d1.2-ultra` peaks at **`72.3%`** (`high`/`max`), while `typesafe/Jev` reaches **`53.4%`** in its single-request default or **`68.8%`** with multi-view + box verification on an earlier 311-grid label pass (and **`68.0%`** vs. `d3-ultra`'s **`80.0%`** in a live 50-attempt reCAPTCHA v2 Enterprise run without box checks).
 - **Offline vs. live scope:** The 4×4 box verification, `--effort` tiers, `Liquid/*`, and `hCaptcha` solve rates have been measured offline or on test keys, not yet on live production verdicts. Full methodology, dataset details, additional models (`Liquid/d1.2`), and caveats live in [docs/RESULTS.md](docs/RESULTS.md) and [docs/BENCHMARK_REPORT_2026-11-15.md](docs/BENCHMARK_REPORT_2026-11-15.md).
 

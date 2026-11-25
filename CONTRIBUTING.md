@@ -42,5 +42,5 @@ Built-in decision-model configurations (endpoint capabilities, multi-view weight
 Regression and parity tests in `src/providers.rs`, `tests/model_routes.rs`, and `tests/test_eval.py` validate exact decision-rule parity without hitting live APIs or bundling CAPTCHA imagery:
 
 - Generate compressed fixtures with `hypercaptcha-eval export --fixture tests/fixtures/<provider>_<model>_4x4.json.gz ...`.
-- **Image-free and label-free requirement**: Fixtures must contain only sanitized model score/box outputs and expected tile picks — never raw CAPTCHA images, human ground-truth labels, third-party URLs, API keys, or proprietary datasets.
+- **Image-free and label-free requirement**: Fixtures must contain only sanitized model score/box outputs and expected tile picks, never raw CAPTCHA images, human ground-truth labels, third-party URLs, API keys, or proprietary datasets.
 - Add or update parity assertions in Rust and Python, and confirm both `cargo test --locked` and `uv run --extra dev pytest -v` pass.

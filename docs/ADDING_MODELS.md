@@ -37,7 +37,7 @@ LIQUID_API_KEY=... cargo run --release --locked -- serve \
 
 ### 2. Record Full Unpruned Outputs for Offline Fitting (`--record`)
 
-`--record` queries every signal any effort tier can use — whole grid, both close-up passes (`capture` and `506` px), skip presence question, and every supported box request (`whole`, `windows`, and `every` if supported) — waits for all replies, logs them all, and leaves the answer unmodified by rules. On 3×3 grids it records standard two-view scores using equal averaging:
+`--record` queries every signal any effort tier can use (whole grid, both close-up passes at `capture` and `506` px, skip presence question, and every supported box request: `whole`, `windows`, and `every` if supported), waits for all replies, logs them all, and leaves the answer unmodified by rules. On 3×3 grids it records standard two-view scores using equal averaging:
 
 ```sh
 LIQUID_API_KEY=... cargo run --release --locked -- serve \
@@ -291,6 +291,6 @@ uv run hypercaptcha-eval summarize reports/my-model-live/trials.jsonl \
 If a decision-model provider does not speak either `systemone-assets` or `systemone-images` (for example, a proprietary JSON payload or multimodal logprob format):
 
 1. **Extend `WireDialect` in `src/captcha/mod.rs`:** Add a new enum variant with its kebab-case `#[serde(rename = "...")]` name (and update `VALID_DIALECTS` in `eval/schema.py` if exporting configs from Python).
-2. **Add a clean dialect adapter module:** Follow `src/liquid.rs` as a template — keep wire translation and any response sanity checks (such as token-floor guards) isolated in a dedicated module with thorough unit tests.
+2. **Add a clean dialect adapter module:** Follow `src/liquid.rs` as a template, keeping wire translation and any response sanity checks (such as token-floor guards) isolated in a dedicated module with thorough unit tests.
 3. **Dispatch on `WireProfile.dialect` in `src/providers.rs`:** Handle encoding and response decoding for `/vision-check`, whole-grid & close-up scoring, skip presence queries, and box queries without adding `provider == ...` special cases.
 4. **Add mock-server integration tests in `tests/model_routes.rs`:** Exercise the new dialect end-to-end against a local mock HTTP server (`GET /config`, `POST /vision-check`, `POST /model`, and effort-level execution) and run `cargo test --locked`.

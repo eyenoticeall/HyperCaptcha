@@ -142,7 +142,7 @@ hCaptcha's public test key never displays an image challenge. To collect or test
 
 1. Create a sitekey in your hCaptcha dashboard and set its behavior to **Always Challenge**.
 2. Set `HCAPTCHA_SITE_KEY` and `HCAPTCHA_SECRET_KEY` in your shell or an `--env-file`.
-3. Because hCaptcha refuses widgets hosted on `localhost` or `127.0.0.1`, HyperCaptcha defaults to serving the hCaptcha lab at **`http://hypercaptcha.localhost:8765`** — modern browsers resolve `.localhost` subdomains to `127.0.0.1` without editing `/etc/hosts`.
+3. Because hCaptcha refuses widgets hosted on `localhost` or `127.0.0.1`, HyperCaptcha defaults to serving the hCaptcha lab at **`http://hypercaptcha.localhost:8765`**. Modern browsers resolve `.localhost` subdomains to `127.0.0.1` without editing `/etc/hosts`.
 4. If hCaptcha rejects `hypercaptcha.localhost` for a live sitekey, add a local hosts entry and pass `--hostname`:
 
 ```sh
@@ -161,7 +161,7 @@ Then pass the matching `--url http://hypercaptcha.test:8765` to `scripts/hcaptch
 
 ## 6. Model Provider Credentials (`.env.example` & `--env-file`)
 
-Copy [`.env.example`](../.env.example) to `.env` (or per-provider files such as `.env.vllm`, `.env.liquid` — all `.env*` files other than `.env.example` are gitignored). HyperCaptcha intentionally **never** auto-loads `.env` files implicitly, so credentials stay explicit. Pass one or more `--env-file <PATH>` flags to `hypercaptcha serve`, or export variables into your shell:
+Copy [`.env.example`](../.env.example) to `.env` (or per-provider files such as `.env.vllm` and `.env.liquid`; all `.env*` files other than `.env.example` are gitignored). HyperCaptcha intentionally **never** auto-loads `.env` files implicitly, so credentials stay explicit. Pass one or more `--env-file <PATH>` flags to `hypercaptcha serve`, or export variables into your shell:
 
 ```sh
 cp .env.example .env
@@ -206,4 +206,4 @@ HyperCaptcha enforces several local boundaries by design:
 - **Strict `Host` and `Origin` checks:** Every request must match `Host: <page_host>:<port>`, and every `POST` request must match `Origin: http://<page_host>:<port>`. Requests from other hostnames or origins receive HTTP `403`, preventing DNS rebinding and cross-origin access to your local API keys.
 - **Hardened HTTP headers & body cap:** Every response sets `Cache-Control: no-store` and `X-Content-Type-Options: nosniff`, and request bodies are capped at `16 MiB` (`1 MiB` per base64 replacement tile).
 - **Redacted server logs:** JSONL server logs (`--log`) record trial IDs, verification outcomes, tile probabilities, decision rule metadata, latency, and token usage, while omitting API keys, CAPTCHA tokens, raw screenshots, and raw telemetry payloads.
-- **Gitignored local artifacts:** Store live logs, captured PNGs, human labels, and offline recordings inside `/reports/`, `/datasets/`, or `/recordings/` — never commit credentials or raw CAPTCHA imagery. See [SECURITY.md](../SECURITY.md) for vulnerability reporting and disclosure guidance.
+- **Gitignored local artifacts:** Store live logs, captured PNGs, human labels, and offline recordings inside `/reports/`, `/datasets/`, or `/recordings/`, and never commit credentials or raw CAPTCHA imagery. See [SECURITY.md](../SECURITY.md) for vulnerability reporting and disclosure guidance.
