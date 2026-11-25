@@ -32,7 +32,7 @@ jobs:
         run: cargo test --locked
 
   python:
-    name: Python (py_compile, pytest)
+    name: Python (py_compile, scripts, pytest)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -44,6 +44,12 @@ jobs:
 
       - name: Syntax-check browser runner scripts
         run: uv run python -m py_compile scripts/chrome_lab.py scripts/camoufox_lab.py scripts/hcaptcha_lab.py
+
+      - name: Check browser runner script imports and CLI help
+        run: |
+          uv run --extra browser python scripts/chrome_lab.py --help >/dev/null
+          uv run --extra browser python scripts/hcaptcha_lab.py --help >/dev/null
+          uv run --extra camoufox python scripts/camoufox_lab.py --help >/dev/null
 
       - name: Run offline evaluation and parity tests
         run: uv run --extra dev pytest -v

@@ -141,6 +141,7 @@ hCaptcha's public test key never displays an image challenge. To collect or test
 # Add to /etc/hosts:
 # 127.0.0.1 hypercaptcha.test
 
+mkdir -p reports
 cargo run --release --locked -- serve \
   --captcha hcaptcha \
   --hostname hypercaptcha.test \
@@ -172,7 +173,7 @@ set -a && source .env && set +a
 | `openai-completions` | Any text completions model (`--model` required) | `OPENAI_API_KEY` | `OPENAI_BASE_URL` (`https://api.openai.com/v1`) | Text-only baseline for v3 score fixtures on OpenAI-compatible `/completions` servers. |
 
 Notes on provider flags:
-- Passing a provider-qualified name such as `--model vLLM/d3-ultra` or `--model Liquid/d1.2-ultra` selects the provider automatically (case-insensitive), so `--provider` may be omitted.
+- Passing a provider-qualified name such as `--model vLLM/d3-ultra` or `--model Liquid/d1.2-ultra` selects the provider automatically (case-insensitive), so `--provider` may be omitted. On `--captcha hcaptcha`, only `vLLM/d3-ultra` is built-in; use `--model-config` or `--provider <provider> --model <id> --decision-rule average` (or `--provider jev --jev-vision average`) for other models.
 - Custom base URLs must include the API version prefix (usually `/v1`).
 - Starting the server without `--provider`, `--model`, or `--model-config` runs in **CAPTCHA-only mode** (useful for capturing datasets or recording human baselines).
 

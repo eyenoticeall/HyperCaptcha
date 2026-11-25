@@ -2,9 +2,49 @@
 
 import argparse
 import json
+import sys
 from urllib.parse import urlsplit
 
 from camoufox.sync_api import Camoufox
+
+MODEL_WAIT_JS = """() => {
+    const result = document.querySelector('#model-result');
+    if (result && !result.hidden && result.textContent.trim().length > 0) {
+        return {kind: 'result', text: result.textContent};
+    }
+    const status = document.querySelector('#model-status');
+    if (
+        status && !status.hidden && status.textContent
+        && status.textContent !== 'Waiting for the model…'
+    ) {
+        return {kind: 'error', text: status.textContent};
+    }
+    const nextButton = document.querySelector('#next');
+    if (nextButton && !nextButton.hidden && !nextButton.disabled) {
+        return {kind: 'error', text: (status && status.textContent) || 'Model request failed.'};
+    }
+    return null;
+}"""
+
+
+def model_reply_failed(model_record):
+    """Return whether a /model response did not produce an answered prediction."""
+    if not isinstance(model_record, dict):
+        return True
+    result = model_record.get("result")
+    if not isinstance(result, dict):
+        return True
+    return result.get("status") != "answered"
+
+
+def format_model_http_error(http_error, status_text):
+    """Format a non-OK /model HTTP error for stderr."""
+    detail = (status_text or "").strip()
+    if http_error is not None:
+        status, body_error = http_error
+        message = body_error or detail or "Model request failed."
+        return f"Model request failed (HTTP {status}): {message}"
+    return f"Model request failed: {detail or 'Unknown error.'}"
 
 
 def main():
@@ -45,6 +85,13 @@ def main():
             if not config_response.ok:
                 parser.error("The lab config could not be loaded.")
             config = config_response.json()
+            model_http_errors = []
+            if args.score and config["provider"]:
+                def on_response(resp):
+                    if urlsplit(resp.url).path == "/model" and not resp.ok:
+                        model_http_errors.append(resp)
+
+                page.on("response", on_response)
             if args.smoke:
                 if not config["test"]:
                     parser.error("--smoke requires --mode v2 --google-test-key.")
@@ -60,11 +107,24 @@ def main():
             record = json.loads(result.inner_text())
             print(json.dumps(record, indent=2))
             if args.score and config["provider"]:
-                model = page.locator("#model-result")
-                model.wait_for(state="visible", timeout=75000)
-                model_record = json.loads(model.inner_text())
+                outcome = page.wait_for_function(MODEL_WAIT_JS, timeout=75000).json_value()
+                if outcome["kind"] != "result":
+                    http_error = None
+                    if model_http_errors:
+                        resp = model_http_errors[-1]
+                        body_error = None
+                        try:
+                            payload = resp.json()
+                            if isinstance(payload, dict):
+                                body_error = payload.get("error")
+                        except Exception:
+                            pass
+                        http_error = (resp.status, body_error)
+                    print(format_model_http_error(http_error, outcome.get("text")), file=sys.stderr)
+                    raise SystemExit(1)
+                model_record = json.loads(outcome["text"])
                 print(json.dumps(model_record, indent=2))
-                if model_record["result"]["status"] == "api_error":
+                if model_reply_failed(model_record):
                     raise SystemExit(1)
             if not record["result"].get("valid"):
                 raise SystemExit(1)

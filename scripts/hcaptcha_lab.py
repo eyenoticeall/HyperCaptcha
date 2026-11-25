@@ -12,18 +12,90 @@ middle of each picture the model selects.
 
 import argparse
 import base64
+import ipaddress
 import json
+import socket
 from contextlib import contextmanager
 from pathlib import Path
 from time import monotonic
 from urllib.parse import urlsplit
 from uuid import uuid4
 
+from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import TimeoutError as BrowserTimeout
 from playwright.sync_api import sync_playwright
 
 CHECKBOX_FRAME = 'iframe[title*="checkbox"]'
 CHALLENGE_FRAME = 'iframe[title*="hCaptcha challenge"]'
+
+
+def positive_int(value):
+    number = int(value)
+    if number <= 0:
+        raise argparse.ArgumentTypeError("expected a positive integer")
+    return number
+
+
+def is_local_hostname(hostname, resolver=socket.getaddrinfo):
+    """Return whether `hostname` is localhost, a `.localhost` subdomain, or resolves only to loopback."""
+    if not hostname:
+        return False
+    host = hostname.rstrip(".").lower()
+    if not host:
+        return False
+    if host == "localhost" or host.endswith(".localhost"):
+        return True
+    try:
+        return ipaddress.ip_address(host.split("%", 1)[0]).is_loopback
+    except ValueError:
+        pass
+    try:
+        infos = resolver(host, None)
+    except OSError:
+        return False
+    addresses = [info[4][0] for info in infos if info and len(info) >= 5 and info[4]]
+    if not addresses:
+        return False
+    try:
+        return all(ipaddress.ip_address(addr.split("%", 1)[0]).is_loopback for addr in addresses)
+    except ValueError:
+        return False
+
+
+def validate_lab_url(raw_url, resolver=socket.getaddrinfo):
+    """Validate and normalize `--url`, ensuring it targets the local lab server."""
+    parts = urlsplit(raw_url)
+    try:
+        _ = parts.port
+    except ValueError:
+        return None
+    if (
+        parts.scheme != "http"
+        or not is_local_hostname(parts.hostname, resolver=resolver)
+        or parts.username is not None
+        or parts.password is not None
+        or parts.path not in ("", "/")
+        or parts.query
+        or parts.fragment
+    ):
+        return None
+    return raw_url.rstrip("/")
+
+
+def resolve_model_name(settings, record):
+    """Return the trial's display model name from /config or model replies."""
+    model_name = settings.get("model_name")
+    if model_name:
+        return model_name
+    for image_round in record.get("rounds", ()):
+        model = image_round.get("model")
+        if isinstance(model, dict) and model.get("model_name"):
+            return model["model_name"]
+    provider = settings.get("provider")
+    model = settings.get("model")
+    if provider and model:
+        return f"{provider}/{model}"
+    return model or None
 
 
 def post(page, path, trial_id, fields):
@@ -213,7 +285,8 @@ def run_trial(page, args, url, record):
         shot, area, settled, found = read_task(challenge, page, trial_id, poll, stale)
         stale = None
         number = len(rounds) + len(passed_over) + 1
-        (directory / f"task-{number:02d}.png").write_bytes(shot)
+        task_image = f"task-{number:02d}.png"
+        (directory / task_image).write_bytes(shot)
         image = base64.b64encode(shot).decode()
         if found["result"]["status"] != "grid":
             if challenge.pages()[0] > 1:
@@ -221,7 +294,12 @@ def run_trial(page, args, url, record):
                 record["outcome"] = "grid_lost_mid_challenge"
                 return
             # Another kind of task. Ask hCaptcha for a different one, as a person may.
-            passed_over.append({"prompt": instruction, "settled": settled, "ms": elapsed()})
+            passed_over.append({
+                "prompt": instruction,
+                "image": task_image,
+                "settled": settled,
+                "ms": elapsed(),
+            })
             if len(passed_over) > args.max_refreshes:
                 record["outcome"] = "no_grid_task"
                 return
@@ -242,8 +320,15 @@ def run_trial(page, args, url, record):
             continue
 
         at, of = challenge.pages()
+        if found.get("grid_png"):
+            round_image = f"grid-{number:02d}.png"
+            (directory / round_image).write_bytes(base64.b64decode(found["grid_png"]))
+        else:
+            round_image = task_image
         entry = {
             "prompt": instruction,
+            "layout": 3,
+            "image": round_image,
             "page": at,
             "pages": of,
             "examples": challenge.examples(),
@@ -252,8 +337,6 @@ def run_trial(page, args, url, record):
             "shown_ms": elapsed(),
         }
         rounds.append(entry)
-        if "grid_png" in found:
-            (directory / f"grid-{number:02d}.png").write_bytes(base64.b64decode(found["grid_png"]))
         if not args.submit:
             record["outcome"] = "captured"
             return
@@ -269,7 +352,11 @@ def run_trial(page, args, url, record):
         entry["model_ms"] = round((monotonic() - asked) * 1000)
         entry["model"] = answer
         prediction = answer["result"].get("prediction")
-        if answer["result"].get("status") != "answered" or prediction.get("type") != "tiles":
+        if (
+            answer["result"].get("status") != "answered"
+            or not isinstance(prediction, dict)
+            or prediction.get("type") != "tiles"
+        ):
             record["outcome"] = "model_error"
             return
         picks = prediction["value"]
@@ -348,17 +435,17 @@ def open_browser():
 def main():
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--url", default="http://hypercaptcha.localhost:8765")
-    parser.add_argument("--trials", type=int, default=1)
+    parser.add_argument("--trials", type=positive_int, default=1)
     parser.add_argument(
-        "--max-rounds", type=int, default=24, help="The most grid pages answered in one trial."
+        "--max-rounds", type=positive_int, default=24, help="The most grid pages answered in one trial."
     )
     parser.add_argument(
-        "--max-stages", type=int, default=1,
+        "--max-stages", type=positive_int, default=1,
         help="Keep going after hCaptcha rejects an answer, until it passes the trial or has"
         " rejected this many challenges.",
     )
     parser.add_argument(
-        "--max-refreshes", type=int, default=12,
+        "--max-refreshes", type=positive_int, default=12,
         help="The most tasks of other kinds to pass over in one trial before giving up.",
     )
     parser.add_argument(
@@ -376,16 +463,9 @@ def main():
     )
     args = parser.parse_args()
     args.browser = "chrome"
-    parts = urlsplit(args.url)
-    if (
-        parts.scheme != "http"
-        or parts.username is not None
-        or parts.path not in ("", "/")
-        or parts.query
-        or parts.fragment
-    ):
-        parser.error("--url must be the URL printed by the lab server.")
-    url = args.url.rstrip("/")
+    url = validate_lab_url(args.url)
+    if url is None:
+        parser.error("--url must be a localhost or loopback URL printed by the lab server.")
 
     with open_browser() as browser:
         with browser.new_context() as config:
@@ -429,11 +509,15 @@ def main():
                 record = {"trial_id": None, "rounds": []}
                 try:
                     run_trial(page, args, url, record)
-                except (BrowserTimeout, RuntimeError) as error:
-                    record.update(outcome="runner_error", detail=str(error).splitlines()[0])
+                except (BrowserTimeout, PlaywrightError, RuntimeError) as error:
+                    detail = (str(error).splitlines() or [type(error).__name__])[0]
+                    record.update(outcome="runner_error", detail=detail)
                 if vision_check_id is not None:
                     record["vision_check_id"] = vision_check_id
             record.update(captcha="hcaptcha", browser=args.browser, browser_version=browser.version)
+            model_name = resolve_model_name(settings, record)
+            if model_name is not None:
+                record["model_name"] = model_name
             with (args.output / "trials.jsonl").open("a") as log:
                 print(json.dumps(record), file=log)
             print(json.dumps(record), flush=True)

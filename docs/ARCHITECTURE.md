@@ -57,7 +57,9 @@ Every `POST` endpoint appends a single JSON line to `--log <path>` (or `io::sink
 
 - **Common fields:** `trial_id`, `source` (`browser` | `camoufox` | `chrome`), `event` (`google` | `hcaptcha` | `model` | `vision_check` | `pictures` | `observation`), `timestamp_ms`, optional `latency_ms`, service tags (`mode` + `google_test_key` for reCAPTCHA; `captcha: "hcaptcha"` + `hcaptcha_test_key` for hCaptcha), model metadata (`requested_model`, `model_name`, `provider`, `tile_threshold` on `model`/`vision_check` events), and event-specific `result`.
 - **Log privacy invariant:** `grid_png` is attached to the HTTP response only **after** logging; screenshots, raw telemetry payloads, CAPTCHA tokens, and API keys are never written to server JSONL logs.
-- **Browser runner logs (`scripts/chrome_lab.py`, `scripts/hcaptcha_lab.py`):** Write `trials.jsonl` (per-round `timeline_ms`, `stage`, `rejection`, grid SHA-256 hashes, optional `--log-tile-network` timings, and `vision_check_id`) and `vision-checks.jsonl` under `--output`.
+- **Browser runner logs (`scripts/chrome_lab.py`, `scripts/hcaptcha_lab.py`):** Both write `trials.jsonl` (top-level `trial_id`, `outcome`, `rounds`, `browser`, `browser_version`, optional `model_name`, optional `vision_check_id`, and `checkbox_to_verification_ms`) and `vision-checks.jsonl` under `--output`:
+  - `scripts/chrome_lab.py` records `mode`, optional `google`/`widget_message`/`tile_network` (`--log-tile-network`), calls `POST /observe`, and writes per-round `prompt`, `layout` (`3` or `4`), `image`, `image_sha256`, `timeline_ms`, and optional `model`, `stage`, `rejection`, `judged`, `reloaded`, `hints`, `early`, `early_not_used`, and `replaced_tile_ids`.
+  - `scripts/hcaptcha_lab.py` records `captcha: "hcaptcha"`, `passed_over` (refreshed non-grid tasks with `prompt`, `image`, `settled`, `ms`), optional `hcaptcha`/`checkbox_to_challenge_ms`/`stages`/`rejections`, does not call `POST /observe`, and writes per-round `prompt`, `layout` (`3`), `image` (`grid-NN.png` or `task-NN.png`), `page`, `pages`, `examples`, `settled`, `pictures`, `shown_ms`, and (when submitting) `model_ms`, `model`, `picks`, `label_before_submit`, `answered_ms`, and `result`.
 
 ---
 
@@ -95,7 +97,7 @@ flowchart TD
 
 1. **Parallel fan-out & transport tuning:**
    - Every scoring request, skip presence request, and box request for a round launches simultaneously on separate threads over HTTP/1.1 (`pool_idle_timeout(None)`, `tcp_nodelay(true)`).
-   - 4×4 close-up crops are grouped at `--close-ups-per-request` (default `4`, capped at `wire.max_images - 1`) with the full scene attached to each crop batch.
+   - 4×4 close-up crops are grouped at `--close-ups-per-request` (default `4`, capped at `min(8, max(wire.max_images - 1, 1))`) with the full scene attached to each crop batch.
    - When `wire.warm_connections` is true (and `--cold-connections` is not set), the server pre-opens `2 + box_reqs + passes * batches` connections (`6`/`7`/`11`/`12` for `vLLM/d3-ultra` `low`/`medium`/`high`/`max`) using a `544×544` noise-JPEG warmup request, keeps them warm for `300 s`, and pings `GET /models` after `45 s` idle (`pool_max_idle_per_host` matches the same count).
    - When `wire.hedge_on_stall` is true (deterministic endpoints only), unanswered requests are hedged at `1.5 s`, `4.0 s`, and `8.0 s`, rotating round-robin across `extra_api_keys_env`. Transient `429`/`5xx` responses obey `Retry-After` (capped at `10 s`).
 2. **Log-odds close-up pass averaging:** Multiple close-up passes (e.g., `capture` + `506` px) are combined in clipped log-odds space (`clip_prob(p) ∈ [1e-4, 1 - 1e-4]`) before scoring.

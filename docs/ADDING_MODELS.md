@@ -130,7 +130,7 @@ MY_DECISION_API_KEY=... cargo run --release --locked -- serve \
 | `image_format` | string | `"jpeg"` | `"jpeg"` (q90) or `"png"` for scoring requests (box requests always use byte-exact Pillow JPEG q90). |
 | `crop_filter` | string | `"bilinear"` | `"bilinear"` or `"nearest"` resampling for 4×4 tile close-ups. |
 | `gzip` | bool | `false` | Gzip-compress JSON request bodies (`Content-Encoding: gzip`). Set `false` for endpoints that reject compressed bodies. |
-| `max_images` | int (`>= 1`) | `16` (`systemone-assets`) / `8` (`systemone-images`) | Maximum pictures allowed in a single request (`8` for Liquid-style endpoints). Automatically caps close-ups per batch to `max_images - 1`. |
+| `max_images` | int (`>= 1`; `>= 2` for `systemone-images`) | `16` (`systemone-assets`) / `8` (`systemone-images`) | Maximum pictures allowed in a single request (`8` for Liquid-style endpoints; must be `>= 2` for `systemone-images` because 4×4 close-up requests attach the scene plus at least one crop). Clamps close-ups per batch to `min(8, max(max_images - 1, 1))` on 4×4 and `max(max_images, 1)` on 3×3. |
 | `multi_state_windows` | bool | `true` (`systemone-assets`) / `false` (`systemone-images`) | `true` packs all 16 window box queries into one multi-state request; `false` sends 16 parallel single-state requests. |
 | `supports_every_box` | bool | `false` | `true` enables the single-question `type = "boxes"` multi-instance query (`boxes.every`). Rust rejects configs that set `boxes.every` while `supports_every_box = false`. |
 | `return_meta` | bool | `false` | Sends `options.return_meta = true` to collect provider queue/compute timings in `provider_meta`. |
@@ -145,7 +145,7 @@ When loading any built-in or external TOML config, `src/captcha/mod.rs` strictly
 - `schema_version == 1` and unknown keys are rejected (`#[serde(deny_unknown_fields)]`).
 - `service` matches `--captcha` (`recaptcha` or `hcaptcha`), and `provider` is a decision provider (`vllm`, `liquid`, `jev`, `custom`).
 - For `provider = "custom"`, `[endpoint]` must supply `dialect`, `base_url`, and `api_key_env`.
-- `base_url` is a valid HTTP/HTTPS URL, all `extra_headers` have valid HTTP header names/values, and `max_images >= 1`.
+- `base_url` is a valid HTTP/HTTPS URL, all `extra_headers` have valid HTTP header names/values, and `max_images >= 1` (`>= 2` when `dialect = "systemone-images"`).
 - All weights are finite, all probability cutoffs/thresholds (`cutoff`, `select_from`, `skip_below`, `gap.*`, `boxes.*`) lie in `0.0..=1.0`, `close_ups` is non-empty with positive pixel sizes (or `"capture"`), and `boxes.every` is only allowed when `supports_every_box = true`.
 
 ---

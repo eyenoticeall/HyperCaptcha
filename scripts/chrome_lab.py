@@ -12,6 +12,7 @@ from time import monotonic
 from urllib.parse import parse_qs, urlsplit
 from uuid import uuid4
 
+from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import TimeoutError as BrowserTimeout
 from playwright.sync_api import sync_playwright
 
@@ -21,6 +22,61 @@ def bounded(value):
     if not 1 <= number <= 20:
         raise argparse.ArgumentTypeError("expected a number from 1 to 20")
     return number
+
+
+def non_negative_int(value):
+    number = int(value)
+    if number < 0:
+        raise argparse.ArgumentTypeError("expected a non-negative integer")
+    return number
+
+
+def resolve_model_name(settings, record):
+    """Return the trial's display model name from /config or model replies."""
+    model_name = settings.get("model_name")
+    if model_name:
+        return model_name
+    for image_round in record.get("rounds", ()):
+        model = image_round.get("model")
+        if isinstance(model, dict) and model.get("model_name"):
+            return model["model_name"]
+    provider = settings.get("provider")
+    model = settings.get("model")
+    if provider and model:
+        return f"{provider}/{model}"
+    return model or None
+
+
+def evaluate_early_answer(answer):
+    """Validate an early /model reply. Returns `(drawn_png, problem)`."""
+    if not isinstance(answer, dict):
+        return None, "no tile answer"
+    result = answer.get("result")
+    if not isinstance(result, dict):
+        return None, "no tile answer"
+    prediction = result.get("prediction")
+    if (
+        result.get("status") != "answered"
+        or not isinstance(prediction, dict)
+        or prediction.get("type") != "tiles"
+    ):
+        return None, "no tile answer"
+    grid_png = answer.pop("grid_png", None)
+    if not isinstance(grid_png, str):
+        return None, "missing drawn grid"
+    drawn = base64.b64decode(grid_png)
+    probs = result.get("tile_probabilities")
+    cutoff = answer.get("tile_threshold")
+    if (
+        isinstance(probs, dict)
+        and cutoff is not None
+        and any(
+            isinstance(score, (int, float)) and abs(score - cutoff) < EARLY_MARGIN
+            for score in probs.values()
+        )
+    ):
+        return None, "a score close to the cutoff"
+    return drawn, None
 
 
 def post(page, path, trial_id, fields):
@@ -317,9 +373,13 @@ def run_trial(page, args, url, record):
         })
         mark("model_answered")
         image_round["model"] = reply
-        prediction = reply["result"].get("prediction", {})
-        if prediction.get("type") != "tiles":
-            record["outcome"] = reply["result"]["status"]
+        prediction = reply["result"].get("prediction")
+        if (
+            reply["result"].get("status") != "answered"
+            or not isinstance(prediction, dict)
+            or prediction.get("type") != "tiles"
+        ):
+            record["outcome"] = reply["result"].get("status", "model_error")
             observe(page, trial_id, "abandoned")
             return
         if (
@@ -374,13 +434,7 @@ def run_trial(page, args, url, record):
                         else:
                             try:
                                 answer = ahead["answer"].result(timeout=3)
-                                drawn = base64.b64decode(answer.pop("grid_png"))
-                                scores = answer["result"]["tile_probabilities"].values()
-                                cutoff = answer["tile_threshold"]
-                                if answer["result"].get("prediction", {}).get("type") != "tiles":
-                                    problem = "no tile answer"
-                                elif any(abs(score - cutoff) < EARLY_MARGIN for score in scores):
-                                    problem = "a score close to the cutoff"
+                                drawn, problem = evaluate_early_answer(answer)
                             except Exception as error:
                                 detail = str(error).partition("\n")[0] or type(error).__name__
                                 problem = f"early request failed: {detail}"
@@ -593,7 +647,7 @@ def main():
         " replacement tile is fetched before it is shown.",
     )
     parser.add_argument(
-        "--max-stages", type=int, default=0,
+        "--max-stages", type=non_negative_int, default=0,
         help="Keep going after Google rejects an answer, until it passes the trial or has rejected"
         " this many times. Grids that Google serves in a row before giving one verdict count"
         " once. 0 stops at the first rejection.",
@@ -654,11 +708,15 @@ def main():
                 record = {"trial_id": None, "rounds": []}
                 try:
                     run_trial(page, args, url, record)
-                except (BrowserTimeout, RuntimeError) as error:
-                    record.update(outcome="runner_error", detail=str(error).splitlines()[0])
+                except (BrowserTimeout, PlaywrightError, RuntimeError) as error:
+                    detail = (str(error).splitlines() or [type(error).__name__])[0]
+                    record.update(outcome="runner_error", detail=detail)
                 if vision_check_id is not None:
                     record["vision_check_id"] = vision_check_id
             record.update(mode=settings["mode"], browser=args.browser, browser_version=browser.version)
+            model_name = resolve_model_name(settings, record)
+            if model_name is not None:
+                record["model_name"] = model_name
             with (args.output / "trials.jsonl").open("a") as log:
                 print(json.dumps(record), file=log)
             print(json.dumps(record), flush=True)
