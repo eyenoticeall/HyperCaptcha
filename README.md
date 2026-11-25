@@ -4,10 +4,11 @@
 
 <p align="center">
   <a href="https://github.com/eyenoticeall/HyperCaptcha/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/eyenoticeall/HyperCaptcha/ci.yml?branch=main&style=flat-square&label=CI&labelColor=1d1e22" alt="CI" /></a>
-  <a href="LICENSE"><img src="https://img.shields.io/github/license/eyenoticeall/HyperCaptcha?style=flat-square&label=License&labelColor=1d1e22&color=3d5afe" alt="License: Apache-2.0" /></a>
-  <a href="Cargo.toml"><img src="https://img.shields.io/badge/Rust-1.88%2B-3d5afe?style=flat-square&labelColor=1d1e22&logo=rust&logoColor=white" alt="Rust 1.88+" /></a>
-  <a href="pyproject.toml"><img src="https://img.shields.io/badge/Python-3.11%2B-3d5afe?style=flat-square&labelColor=1d1e22&logo=python&logoColor=white" alt="Python 3.11+" /></a>
-  <a href="https://github.com/eyenoticeall/HyperCaptcha/stargazers"><img src="https://img.shields.io/github/stars/eyenoticeall/HyperCaptcha?style=flat-square&label=Stars&labelColor=1d1e22&color=3d5afe" alt="GitHub Stars" /></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/eyenoticeall/HyperCaptcha?style=flat-square&label=License&labelColor=1d1e22&color=199e68" alt="License: Apache-2.0" /></a>
+  <a href="Cargo.toml"><img src="https://img.shields.io/badge/Rust-1.88%2B-f74c00?style=flat-square&labelColor=1d1e22&logo=rust&logoColor=white" alt="Rust 1.88+" /></a>
+  <a href="pyproject.toml"><img src="https://img.shields.io/badge/Python-3.11%2B-3776ab?style=flat-square&labelColor=1d1e22&logo=python&logoColor=ffd43b" alt="Python 3.11+" /></a>
+  <a href="pyproject.toml"><img src="https://img.shields.io/badge/Browser-Camoufox-7c3aed?style=flat-square&labelColor=1d1e22&logo=firefoxbrowser&logoColor=white" alt="Camoufox" /></a>
+  <a href="https://github.com/eyenoticeall/HyperCaptcha/stargazers"><img src="https://img.shields.io/github/stars/eyenoticeall/HyperCaptcha?style=flat-square&label=Stars&labelColor=1d1e22&color=eab308" alt="GitHub Stars" /></a>
 </p>
 
 # HyperCaptcha
