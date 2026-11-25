@@ -20,6 +20,10 @@ Asking a vision model once on a raw screenshot leaves accuracy on the table: edg
 - **Bounding-box verification (veto, not rescue):** At `--effort medium` and above, the harness asks the model to locate target instances with bounding boxes (up to 9 whole-grid boxes on `vLLM`, a single multi-instance query on `Liquid`, plus 16 zoomed per-tile windows at `max`). High-confidence picks (`≥ 95.3%` on `d3-ultra`) pass automatically; lower-confidence picks are dropped unless a confident box reaches into that square.
 - **Early-tile inference & reproducible preprocessing:** On dynamic 3×3 grids, replacement tiles are composited and scored ahead of the widget's reveal timer as soon as they are fetched. Parallel crop batching, connection warming, hedged retries, and byte-exact Pillow/libjpeg encoding (`src/pillow.rs`) keep latency low and offline replays identical to live runs.
 
+<p align="center">
+  <img src="docs/assets/example-model-selections.png" alt="Side-by-side comparison of real recorded tile selections from vLLM/d3-ultra, Liquid/d1.2-ultra, and typesafe/Jev on identical 4x4 reCAPTCHA traffic-light and motorcycle grids" width="100%" />
+</p>
+
 ---
 
 ## How Models Perform in HyperCaptcha
@@ -38,12 +42,6 @@ HyperCaptcha lets you dial how much work the harness asks a model to do on each 
 
 <p align="center">
   <img src="docs/assets/results-effort-frontier.png" alt="4x4 CAPTCHA solve accuracy vs input token budget and compute wait across HyperCaptcha effort levels for vLLM/d3-ultra, Liquid/d1.2-ultra, and typesafe/Jev" width="100%" />
-</p>
-
-### Side-by-Side Tile Selections on Real 4×4 Grids
-
-<p align="center">
-  <img src="docs/assets/example-model-selections.png" alt="Side-by-side comparison of real recorded tile selections from vLLM/d3-ultra, Liquid/d1.2-ultra, and typesafe/Jev on identical 4x4 reCAPTCHA traffic-light and motorcycle grids" width="100%" />
 </p>
 
 - **Why `--effort high` is the default:** Inside HyperCaptcha, `vLLM/d3-ultra` at `high` solves **`82.9%` (`281/339`)** of 4×4 test grids, within 1 grid of `max` (`83.2%`, `282/339`), while using **`4,404` fewer input tokens** and cutting median provider compute wait roughly in half (**`282 ms`** vs. **`556 ms`**).
