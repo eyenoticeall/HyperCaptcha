@@ -10,6 +10,7 @@ from pathlib import Path
 from statistics import mean, median
 from typing import Any, Mapping, Sequence
 
+from eval.dataset import _find_trial_files
 from eval.schema import allows_skipping_prompt, read_jsonl
 
 WILSON_Z95 = 1.95996398454
@@ -65,6 +66,41 @@ def _trial_service(trial: Mapping[str, Any]) -> str:
     return "recaptcha"
 
 
+def _trial_is_challenged(trial: Mapping[str, Any]) -> bool:
+    return bool(trial.get("rounds")) and trial.get("outcome") != "captured"
+
+
+def _round_layout(rnd: Mapping[str, Any], service: str, default: int = 3) -> int:
+    if service == "hcaptcha":
+        return 3
+    raw = rnd.get("layout")
+    if raw is None:
+        return default
+    return int(raw)
+
+
+def _trial_condition(trial: Mapping[str, Any]) -> str:
+    for key in ("condition", "model_name"):
+        val = trial.get(key)
+        if isinstance(val, str):
+            if val.strip():
+                return val
+        elif val is not None:
+            return str(val)
+    for rnd in trial.get("rounds") or []:
+        if not isinstance(rnd, Mapping):
+            continue
+        model = rnd.get("model")
+        if isinstance(model, Mapping):
+            val = model.get("model_name")
+            if isinstance(val, str):
+                if val.strip():
+                    return val
+            elif val is not None:
+                return str(val)
+    return "default"
+
+
 def _classify_first_round(trial: Mapping[str, Any]) -> str | None:
     rounds = trial.get("rounds") or []
     if not rounds:
@@ -73,9 +109,10 @@ def _classify_first_round(trial: Mapping[str, Any]) -> str | None:
     first = rounds[0]
     prompt = str(first.get("prompt", ""))
     if service == "hcaptcha":
-        pages = int(first.get("pages", 1))
+        raw_pages = first.get("pages")
+        pages = int(raw_pages) if raw_pages is not None else 1
         return "3x3_hcaptcha_multi" if pages > 1 else "3x3_hcaptcha_single"
-    layout = int(first.get("layout", 3))
+    layout = _round_layout(first, service)
     if layout == 3:
         if "once there are none left" in prompt.lower():
             return "3x3_dynamic"
@@ -128,7 +165,7 @@ def summarize_trials(trials: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
 
     verified = [t for t in filtered if _trial_is_verified(t)]
     checkbox_only = [t for t in filtered if t.get("outcome") == "checkbox_only"]
-    challenged = [t for t in filtered if t.get("rounds")]
+    challenged = [t for t in filtered if _trial_is_challenged(t)]
     challenged_solved = [t for t in challenged if _trial_is_verified(t)]
 
     rejection_counts = [_trial_rejections(t) for t in challenged]
@@ -143,7 +180,7 @@ def summarize_trials(trials: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         if ctype:
             by_type[ctype].append(t)
         service = _trial_service(t)
-        side = 3 if service == "hcaptcha" else int(t["rounds"][0].get("layout", 3))
+        side = _round_layout(t["rounds"][0], service)
         by_layout[f"{side}x{side}"].append(t)
 
     def _bucket_stats(bucket: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
@@ -181,7 +218,7 @@ def summarize_trials(trials: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         c2v = t.get("checkbox_to_verification_ms")
         if is_ok and c2v is not None:
             solved_c2v_all.append(float(c2v))
-            if t.get("rounds"):
+            if _trial_is_challenged(t):
                 solved_c2v_challenged.append(float(c2v))
 
         trial_in_tok = 0
@@ -198,13 +235,13 @@ def summarize_trials(trials: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
             inp, out = _round_usage(rnd)
             if inp is not None:
                 input_tokens_all.append(inp)
-                side = 3 if service == "hcaptcha" else int(rnd.get("layout", 3))
+                side = _round_layout(rnd, service)
                 input_tokens_by_layout[f"{side}x{side}"].append(inp)
                 trial_in_tok += inp
                 has_trial_tok = True
             if out is not None:
                 output_tokens_all.append(out)
-        if is_ok and t.get("rounds") and has_trial_tok:
+        if is_ok and _trial_is_challenged(t) and has_trial_tok:
             solved_trial_input_tokens.append(trial_in_tok)
 
     timelines = {k: summarize_distribution(v) for k, v in timeline_vals.items()}
@@ -242,19 +279,16 @@ def summarize_trials(trials: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
 
 
 def summarize_files(paths: Sequence[str | Path], *, group_by_condition: bool = False) -> dict[str, Any]:
-    """Load one or more `trials.jsonl` files and return a summary report."""
+    """Load one or more `trials.jsonl` files or run directories and return a summary report."""
     all_rows: list[dict[str, Any]] = []
-    for raw in paths:
-        p = Path(raw)
-        if p.is_dir():
-            p = p / "trials.jsonl"
-        all_rows.extend(read_jsonl(p))
+    for trials_path, _, _ in _find_trial_files(paths):
+        all_rows.extend(read_jsonl(trials_path))
 
     trials = [r for r in all_rows if "kind" not in r or r["kind"] == "trial"]
     if group_by_condition:
         groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
         for t in trials:
-            key = str(t.get("condition") or t.get("model_name") or "default")
+            key = _trial_condition(t)
             groups[key].append(t)
         return {
             "overall": summarize_trials(trials),

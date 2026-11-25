@@ -9,10 +9,12 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping, Sequence
+from urllib.parse import urlsplit
 
 import numpy as np
 
@@ -569,9 +571,40 @@ class ModelConfig:
         return cfg
 
 
+_HEADER_NAME_RE = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
+
+
 def _check_prob(value: float, label: str) -> None:
     if not (0.0 <= value <= 1.0) or math.isnan(value):
         raise ValueError(f"{label} must be in [0.0, 1.0], got {value}")
+
+
+def _validate_base_url(base_url: str) -> None:
+    """Validate API base URL matching Rust `providers::validate_base_url`."""
+    if not base_url or any(ch.isspace() or ord(ch) < 0x20 or ord(ch) == 0x7F for ch in base_url):
+        raise ValueError(f"invalid endpoint.base_url {base_url!r}: must be a valid HTTP or HTTPS URL")
+    if "?" in base_url or "#" in base_url:
+        raise ValueError("endpoint.base_url cannot contain credentials, a query, or a fragment")
+    try:
+        parts = urlsplit(base_url)
+        _ = parts.port
+    except ValueError as exc:
+        raise ValueError(f"invalid endpoint.base_url {base_url!r}: {exc}") from exc
+    if parts.scheme.lower() not in ("http", "https") or not parts.hostname:
+        raise ValueError(f"endpoint.base_url must use HTTP or HTTPS with a host, got {base_url!r}")
+    if parts.username is not None or parts.password is not None or "@" in parts.netloc:
+        raise ValueError("endpoint.base_url cannot contain credentials, a query, or a fragment")
+
+
+def _validate_extra_headers(headers: Mapping[str, str]) -> None:
+    """Validate HTTP header names and values matching Rust `WireProfile::validate`."""
+    for name, value in headers.items():
+        if not isinstance(name, str) or not _HEADER_NAME_RE.match(name):
+            raise ValueError(f"invalid endpoint.extra_headers name {name!r}")
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"invalid endpoint.extra_headers value for {name!r}: must be non-empty")
+        if any((ord(ch) < 0x20 and ch != "\t") or ord(ch) >= 0x7F for ch in value):
+            raise ValueError(f"invalid endpoint.extra_headers value for {name!r}")
 
 
 def validate_model_config(cfg: ModelConfig) -> None:
@@ -588,18 +621,37 @@ def validate_model_config(cfg: ModelConfig) -> None:
         raise ValueError("model_id must be non-empty")
 
     supports_every = cfg.provider == "liquid"
+    effective_dialect = (
+        cfg.endpoint.dialect
+        if (cfg.endpoint is not None and cfg.endpoint.dialect is not None)
+        else ("systemone-images" if cfg.provider == "liquid" else "systemone-assets")
+    )
     if cfg.endpoint is not None:
         ep = cfg.endpoint
         if ep.dialect is not None and ep.dialect not in VALID_DIALECTS:
             raise ValueError(f"invalid endpoint.dialect {ep.dialect!r}")
+        if ep.base_url is not None:
+            _validate_base_url(ep.base_url)
+        if ep.api_key_env is not None and not ep.api_key_env.strip():
+            raise ValueError("endpoint.api_key_env must be non-empty")
+        if ep.extra_api_keys_env is not None and not ep.extra_api_keys_env.strip():
+            raise ValueError("endpoint.extra_api_keys_env must be non-empty when set")
         if ep.image_format is not None and ep.image_format not in VALID_IMAGE_FORMATS:
             raise ValueError(f"invalid endpoint.image_format {ep.image_format!r}")
         if ep.crop_filter is not None and ep.crop_filter not in VALID_CROP_FILTERS:
             raise ValueError(f"invalid endpoint.crop_filter {ep.crop_filter!r}")
-        if ep.max_images is not None and ep.max_images < 1:
-            raise ValueError(f"endpoint.max_images must be >= 1, got {ep.max_images}")
+        if ep.max_images is not None:
+            if isinstance(ep.max_images, bool):
+                raise ValueError(f"endpoint.max_images must be an integer, got {ep.max_images!r}")
+            min_images = 2 if effective_dialect == "systemone-images" else 1
+            if ep.max_images < min_images:
+                raise ValueError(
+                    f"endpoint.max_images must be >= {min_images} for {effective_dialect}, got {ep.max_images}"
+                )
         if ep.supports_every_box is not None:
             supports_every = ep.supports_every_box
+        if ep.extra_headers:
+            _validate_extra_headers(ep.extra_headers)
 
     if cfg.provider == "custom":
         if cfg.endpoint is None:
@@ -612,7 +664,12 @@ def validate_model_config(cfg: ModelConfig) -> None:
         if t.default_decision not in VALID_DECISIONS:
             raise ValueError(f"invalid tuning.default_decision {t.default_decision!r}")
         if t.logistic_3x3 is not None:
+            if not all(math.isfinite(w) for w in t.logistic_3x3.weights):
+                raise ValueError("tuning.logistic_3x3.weights must all be finite")
             _check_prob(t.logistic_3x3.cutoff, "tuning.logistic_3x3.cutoff")
+        if t.logistic_4x4 is not None:
+            if not all(math.isfinite(w) for w in t.logistic_4x4):
+                raise ValueError("tuning.logistic_4x4.weights must all be finite")
         plans: list[tuple[str, Plan]] = []
         if t.average_4x4 is not None:
             plans.append(("tuning.average_4x4", t.average_4x4))
@@ -949,6 +1006,8 @@ def make_group_folds(
     seed: int = 7,
 ) -> tuple[np.ndarray, np.ndarray, int, int]:
     """Deterministic grouped K-fold assignment matching `lib.py:load`."""
+    if isinstance(n_folds, bool) or n_folds < 2:
+        raise ValueError(f"n_folds must be >= 2, got {n_folds}")
     groups = sorted(set(str(g) for g in group_ids))
     n_groups = len(groups)
     if n_groups < 2:

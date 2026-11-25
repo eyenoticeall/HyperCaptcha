@@ -41,42 +41,108 @@ def _find_trial_files(inputs: Sequence[str | Path]) -> list[tuple[Path, Path, st
     return found
 
 
+def _sorted_numbered_pngs(tdir: Path, prefix: str) -> list[Path]:
+    def _sort_key(path: Path) -> tuple[int, int, str]:
+        suffix = path.stem.removeprefix(prefix)
+        if suffix.isdigit():
+            return (0, int(suffix), path.name)
+        return (1, 0, path.name)
+
+    return sorted(tdir.glob(f"{prefix}*.png"), key=_sort_key)
+
+
+def _is_number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _infer_hcaptcha_task_numbers(
+    rounds: Sequence[dict[str, Any]],
+    passed_over: Sequence[Any],
+) -> list[int] | None:
+    """Reconstruct 1-based hcaptcha_lab task numbers for legacy logs lacking per-round `image`."""
+    if not passed_over:
+        return [idx + 1 for idx in range(len(rounds))]
+    if not all(isinstance(p, dict) and _is_number(p.get("ms")) for p in passed_over):
+        return None
+    if not all(isinstance(r, dict) and _is_number(r.get("shown_ms")) for r in rounds):
+        return None
+    timeline: list[tuple[float, int, int, str]] = []
+    for idx, p in enumerate(passed_over):
+        timeline.append((float(p["ms"]), 0, idx, "passed_over"))
+    for idx, r in enumerate(rounds):
+        timeline.append((float(r["shown_ms"]), 1, idx, "round"))
+    timeline.sort()
+    numbers = [0] * len(rounds)
+    for task_num, (_, _, orig_idx, kind) in enumerate(timeline, start=1):
+        if kind == "round":
+            numbers[orig_idx] = task_num
+    return numbers
+
+
 def _resolve_round_image(
     rnd: dict[str, Any],
     run_dir: Path,
     trial_id: str | None,
     round_idx: int,
     service: str,
+    *,
+    n_rounds: int = 1,
+    passed_over: Sequence[Any] = (),
+    task_number: int | None = None,
 ) -> tuple[Path | None, bool]:
     """Resolve a round's PNG image path and whether it is a pre-composed hCaptcha 3x3 grid."""
     raw_image = rnd.get("image")
     if raw_image:
-        cand = Path(raw_image)
-        if cand.is_file():
-            resolved = cand.resolve()
-            return resolved, (service == "hcaptcha" and resolved.name.startswith("grid-"))
-        for base in (run_dir, run_dir / (trial_id or "")):
-            alt = base / cand.name
-            if alt.is_file():
-                resolved = alt.resolve()
-                return resolved, (service == "hcaptcha" and resolved.name.startswith("grid-"))
-            rel = base / cand
-            if rel.is_file():
-                resolved = rel.resolve()
+        cand = Path(str(raw_image))
+        candidates: list[Path] = []
+        if cand.is_absolute():
+            candidates.append(cand)
+            if trial_id:
+                candidates.append(run_dir / trial_id / cand.name)
+            candidates.append(run_dir / cand.name)
+        else:
+            if trial_id:
+                candidates.append(run_dir / trial_id / cand)
+            candidates.append(run_dir / cand)
+            if trial_id:
+                candidates.append(run_dir / trial_id / cand.name)
+            candidates.append(run_dir / cand.name)
+            candidates.append(cand)
+        for path in candidates:
+            if path.is_file():
+                resolved = path.resolve()
                 return resolved, (service == "hcaptcha" and resolved.name.startswith("grid-"))
         return None, False
 
-    # hcaptcha_lab.py writes grid-NN.png / task-NN.png inside run_dir / trial_id.
+    # Legacy fallback: hcaptcha_lab.py writes grid-NN.png / task-NN.png inside run_dir / trial_id.
     if trial_id:
         tdir = run_dir / trial_id
         if tdir.is_dir():
             if service == "hcaptcha":
-                grids = sorted(tdir.glob("grid-*.png"))
-                if round_idx < len(grids):
+                if task_number is not None:
+                    exact_grid = tdir / f"grid-{task_number:02d}.png"
+                    if exact_grid.is_file():
+                        return exact_grid.resolve(), True
+                    exact_task = tdir / f"task-{task_number:02d}.png"
+                    if exact_task.is_file():
+                        return exact_task.resolve(), False
+
+                grids = _sorted_numbered_pngs(tdir, "grid-")
+                if len(grids) == n_rounds and round_idx < len(grids):
                     return grids[round_idx].resolve(), True
-                tasks = sorted(tdir.glob("task-*.png"))
-                if round_idx < len(tasks):
-                    return tasks[round_idx].resolve(), False
+
+                if not passed_over:
+                    if round_idx < len(grids):
+                        return grids[round_idx].resolve(), True
+                    tasks = _sorted_numbered_pngs(tdir, "task-")
+                    if round_idx < len(tasks):
+                        return tasks[round_idx].resolve(), False
+                elif all(isinstance(p, dict) and p.get("image") for p in passed_over):
+                    passed_names = {Path(str(p["image"])).name for p in passed_over}
+                    remaining = [t for t in _sorted_numbered_pngs(tdir, "task-") if t.name not in passed_names]
+                    if round_idx < len(remaining):
+                        return remaining[round_idx].resolve(), False
+                return None, False
             else:
                 cand = tdir / f"round-{round_idx + 1:02d}.png"
                 if cand.is_file():
@@ -138,10 +204,22 @@ def build_dataset(
 
             raw_trial_id = trial.get("trial_id")
             group_id = str(raw_trial_id) if raw_trial_id else f"{source_run}:trial-{trial_idx + 1}"
+            raw_passed_over = trial.get("passed_over")
+            passed_over = raw_passed_over if isinstance(raw_passed_over, list) else []
+            task_numbers = (
+                _infer_hcaptcha_task_numbers(rounds, passed_over)
+                if trial_service == "hcaptcha"
+                else None
+            )
 
             for round_idx, rnd in enumerate(rounds):
                 stats["rounds_scanned"] += 1
-                rnd_layout = int(rnd.get("layout", 3 if trial_service == "hcaptcha" else 4))
+                raw_layout = rnd.get("layout")
+                rnd_layout = (
+                    int(raw_layout)
+                    if raw_layout is not None
+                    else (3 if trial_service == "hcaptcha" else 4)
+                )
                 if layout is not None and rnd_layout != layout:
                     stats["filtered_out"] += 1
                     continue
@@ -152,7 +230,14 @@ def build_dataset(
                     continue
 
                 img_path, is_precomposed_grid = _resolve_round_image(
-                    rnd, run_dir, raw_trial_id, round_idx, trial_service
+                    rnd,
+                    run_dir,
+                    raw_trial_id,
+                    round_idx,
+                    trial_service,
+                    n_rounds=len(rounds),
+                    passed_over=passed_over,
+                    task_number=task_numbers[round_idx] if task_numbers is not None else None,
                 )
                 if img_path is None:
                     stats["missing_images"] += 1

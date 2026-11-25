@@ -19,10 +19,15 @@ import pytest
 
 from eval.cli import main as cli_main
 from eval.dataset import UNIFORM_3X3_PICTURES, build_dataset
-from eval.export import export_model, render_model_toml
+from eval.export import export_model, render_model_toml, write_parity_fixture
 from eval.fit import fit_dataset
-from eval.label_server import LabelStore, compare_labels, create_label_server
-from eval.record import record_dataset
+from eval.label_server import (
+    LabelStore,
+    _is_loopback_host_header,
+    compare_labels,
+    create_label_server,
+)
+from eval.record import _has_recording_error, record_dataset
 from eval.schema import (
     EFFORT_NAMES,
     LOG_ODDS_3,
@@ -41,9 +46,11 @@ from eval.schema import (
     load_model_config,
     logistic_scores_3x3,
     logistic_scores_4x4,
+    make_group_folds,
+    validate_model_config,
 )
-from eval.summarize import format_summary_markdown, summarize_files, wilson_proportion
-from eval.sweep import sweep_4x4
+from eval.summarize import format_summary_markdown, summarize_files, summarize_trials, wilson_proportion
+from eval.sweep import grouped_bootstrap_diff, sweep_4x4
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FIXTURES_DIR = REPO_ROOT / "tests" / "fixtures"
@@ -1220,3 +1227,756 @@ def test_python_module_cli_help() -> None:
             check=True,
         )
         assert f"hypercaptcha-eval {sub}" in sub_proc.stdout
+
+
+# ---------------------------------------------------------------------------
+# 7. Regression tests for audit fixes across eval/*
+# ---------------------------------------------------------------------------
+
+
+def test_summarize_regressions_condition_captured_null_layout_and_nested_dirs(tmp_path: Path) -> None:
+    """Verify summarize fallback grouping, captured trials, null layout guard, and nested dirs."""
+    run_a = tmp_path / "runs" / "model_a"
+    run_b = tmp_path / "runs" / "model_b"
+    run_a.mkdir(parents=True)
+    run_b.mkdir(parents=True)
+
+    # Real runner logs omit top-level condition/model_name and store rounds[i].model.model_name.
+    trials_a = [
+        {
+            "trial_id": "a-1",
+            "outcome": "model_solved",
+            "google": {"result": {"valid": True}},
+            "rounds": [
+                {
+                    "layout": None,
+                    "prompt": "Select all images with\nbicycles",
+                    "model": {
+                        "model_name": "vLLM/d3-ultra",
+                        "latency_ms": 420,
+                        "result": {"status": "answered", "usage": {"input_tokens": 1100, "output_tokens": 8}},
+                    },
+                }
+            ],
+        },
+        # Capture-only trial should NOT count as a failed challenged attempt.
+        {
+            "trial_id": "a-cap",
+            "outcome": "captured",
+            "rounds": [
+                {
+                    "layout": 4,
+                    "prompt": "Select all squares with\nbuses",
+                }
+            ],
+        },
+    ]
+    trials_b = [
+        {
+            "trial_id": "b-1",
+            "captcha": "hcaptcha",
+            "outcome": "model_failed",
+            "rejections": 1,
+            "rounds": [
+                {
+                    "prompt": "Pick the tiger",
+                    "pages": None,
+                    "model_ms": 510,
+                    "model": {
+                        "model_name": "Liquid/d1.2-ultra",
+                        "result": {"status": "answered", "usage": {"input_tokens": 1500, "output_tokens": 6}},
+                    },
+                }
+            ],
+        },
+        # Explicit top-level model_name takes precedence over nested round model_name.
+        {
+            "trial_id": "b-2",
+            "model_name": "TopLevel/model",
+            "outcome": "checkbox_only",
+            "google": {"result": {"valid": True}},
+            "rounds": [],
+        },
+    ]
+    (run_a / "trials.jsonl").write_text("\n".join(json.dumps(t) for t in trials_a) + "\n", encoding="utf-8")
+    (run_b / "trials.jsonl").write_text("\n".join(json.dumps(t) for t in trials_b) + "\n", encoding="utf-8")
+
+    # Directory without top-level trials.jsonl discovers nested trials.jsonl files.
+    rep = summarize_files([tmp_path / "runs"], group_by_condition=True)
+    assert set(rep["by_condition"].keys()) == {"vLLM/d3-ultra", "Liquid/d1.2-ultra", "TopLevel/model", "default"}
+
+    ov = rep["overall"]
+    assert ov["attempts"] == 4
+    assert ov["outcomes"]["captured"] == 1
+    # Only a-1 (solved) and b-1 (failed) are challenged; a-cap (captured) and b-2 (checkbox_only) are excluded.
+    assert ov["verified_challenged"]["passed"] == 1
+    assert ov["verified_challenged"]["total"] == 2
+    assert ov["first_stage_pass"]["passed"] == 1
+    assert ov["first_stage_pass"]["total"] == 2
+    assert set(ov["by_challenge_type"].keys()) == {"3x3_static", "3x3_hcaptcha_single"}
+    assert ov["tokens"]["by_layout_input"]["3x3"]["count"] == 2
+
+    # Condition vLLM/d3-ultra has 1/1 challenged solved; default (capture-only) has 0/0 challenged.
+    assert rep["by_condition"]["vLLM/d3-ultra"]["verified_challenged"]["passed"] == 1
+    assert rep["by_condition"]["vLLM/d3-ultra"]["verified_challenged"]["total"] == 1
+    assert rep["by_condition"]["default"]["verified_challenged"]["total"] == 0
+
+    # Empty directory with no trials.jsonl raises FileNotFoundError.
+    empty_dir = tmp_path / "empty_runs"
+    empty_dir.mkdir()
+    with pytest.raises(FileNotFoundError, match="no trials.jsonl"):
+        summarize_files([empty_dir])
+
+    # Direct summarize_trials with null layout and captured trial.
+    direct = summarize_trials(trials_a)
+    assert direct["verified_challenged"]["passed"] == 1
+    assert direct["verified_challenged"]["total"] == 1
+
+
+def test_dataset_hcaptcha_passed_over_explicit_and_legacy_fallback(tmp_path: Path) -> None:
+    """Verify hCaptcha image alignment after passed_over tasks for explicit & legacy logs."""
+    custom_pictures = [[0.1 + 0.25 * c, 0.05 + 0.3 * r, 0.2, 0.25] for r in range(3) for c in range(3)]
+    run_dir = tmp_path / "hc_passed_over"
+
+    # 1. Explicit per-round `image` and `layout` (new hcaptcha_lab.py format).
+    (run_dir / "t-explicit").mkdir(parents=True)
+    (run_dir / "t-explicit" / "task-01.png").write_bytes(TINY_PNG + b"passed-over-drag")
+    (run_dir / "t-explicit" / "task-02.png").write_bytes(TINY_PNG + b"explicit-task-02")
+    (run_dir / "t-explicit" / "grid-02.png").write_bytes(TINY_PNG + b"explicit-grid-02")
+    (run_dir / "t-explicit" / "task-03.png").write_bytes(TINY_PNG + b"passed-over-point")
+    (run_dir / "t-explicit" / "task-04.png").write_bytes(TINY_PNG + b"explicit-task-04")
+
+    # 2. Legacy log WITHOUT per-round `image` and WITHOUT `grid-*.png`, WITH ms/shown_ms timestamps.
+    (run_dir / "t-legacy-ts").mkdir(parents=True)
+    (run_dir / "t-legacy-ts" / "task-01.png").write_bytes(TINY_PNG + b"legacy-passed-1")
+    (run_dir / "t-legacy-ts" / "task-02.png").write_bytes(TINY_PNG + b"legacy-grid-round-0")
+    (run_dir / "t-legacy-ts" / "task-03.png").write_bytes(TINY_PNG + b"legacy-passed-2")
+    (run_dir / "t-legacy-ts" / "task-04.png").write_bytes(TINY_PNG + b"legacy-grid-round-1")
+
+    # 3. Legacy log WITHOUT `image`, WITHOUT `grid-*.png`, and WITHOUT timestamps -> must NOT pair task-01.png!
+    (run_dir / "t-legacy-ambig").mkdir(parents=True)
+    (run_dir / "t-legacy-ambig" / "task-01.png").write_bytes(TINY_PNG + b"ambig-passed-1")
+    (run_dir / "t-legacy-ambig" / "task-02.png").write_bytes(TINY_PNG + b"ambig-task-2")
+
+    # 4. Legacy log with passed_over[].image set (no timestamps, no round.image, no grid-*.png).
+    (run_dir / "t-passed-img").mkdir(parents=True)
+    (run_dir / "t-passed-img" / "task-01.png").write_bytes(TINY_PNG + b"pimg-passed-1")
+    (run_dir / "t-passed-img" / "task-02.png").write_bytes(TINY_PNG + b"pimg-round-0")
+
+    trials = [
+        {
+            "trial_id": "t-explicit",
+            "captcha": "hcaptcha",
+            "passed_over": [
+                {"prompt": "Drag puzzle", "settled": True, "ms": 800, "image": "task-01.png"},
+                {"prompt": "Click point", "settled": True, "ms": 3000, "image": "task-03.png"},
+            ],
+            "rounds": [
+                {
+                    "prompt": "Pick the flying animal",
+                    "layout": 3,
+                    "image": "grid-02.png",
+                    "page": 1,
+                    "pages": 2,
+                    "shown_ms": 1500,
+                    "pictures": custom_pictures,
+                },
+                {
+                    "prompt": "Pick the boat",
+                    "layout": None,
+                    "image": "task-04.png",
+                    "page": 2,
+                    "pages": 2,
+                    "shown_ms": 4200,
+                    "pictures": custom_pictures,
+                },
+            ],
+        },
+        {
+            "trial_id": "t-legacy-ts",
+            "captcha": "hcaptcha",
+            "passed_over": [
+                {"prompt": "Drag puzzle", "settled": True, "ms": 900},
+                {"prompt": "Follow object", "settled": False, "ms": 3500},
+            ],
+            "rounds": [
+                {
+                    "prompt": "Pick the cat",
+                    "page": 1,
+                    "pages": 2,
+                    "shown_ms": 2100,
+                    "pictures": custom_pictures,
+                },
+                {
+                    "prompt": "Pick the dog",
+                    "page": 2,
+                    "pages": 2,
+                    "shown_ms": 5200,
+                    "pictures": custom_pictures,
+                },
+            ],
+        },
+        {
+            "trial_id": "t-legacy-ambig",
+            "captcha": "hcaptcha",
+            "passed_over": [{"prompt": "Drag puzzle"}],
+            "rounds": [
+                {
+                    "prompt": "Pick the frog",
+                    "page": 1,
+                    "pages": 1,
+                    "pictures": custom_pictures,
+                }
+            ],
+        },
+        {
+            "trial_id": "t-passed-img",
+            "captcha": "hcaptcha",
+            "passed_over": [{"prompt": "Drag puzzle", "image": "task-01.png"}],
+            "rounds": [
+                {
+                    "prompt": "Pick the owl",
+                    "page": 1,
+                    "pages": 1,
+                    "pictures": custom_pictures,
+                }
+            ],
+        },
+    ]
+    (run_dir / "trials.jsonl").write_text("\n".join(json.dumps(t) for t in trials) + "\n", encoding="utf-8")
+
+    ds_path = tmp_path / "hc_aligned.jsonl"
+    stats = build_dataset([run_dir], ds_path)
+    assert stats["written"] == 5
+    assert stats["missing_images"] == 1  # t-legacy-ambig refused to misalign
+
+    rows = [json.loads(line) for line in ds_path.read_text(encoding="utf-8").splitlines()]
+    by_prompt = {r["prompt"]: r for r in rows}
+    assert "Pick the frog" not in by_prompt
+
+    assert Path(by_prompt["Pick the flying animal"]["image"]).name == "grid-02.png"
+    assert by_prompt["Pick the flying animal"]["pictures"] == UNIFORM_3X3_PICTURES
+    assert Path(by_prompt["Pick the boat"]["image"]).name == "task-04.png"
+    assert by_prompt["Pick the boat"]["layout"] == 3
+    assert by_prompt["Pick the boat"]["pictures"] == custom_pictures
+
+    # Legacy timestamped fallback picked task-02.png and task-04.png (skipping task-01.png & task-03.png).
+    assert Path(by_prompt["Pick the cat"]["image"]).name == "task-02.png"
+    assert by_prompt["Pick the cat"]["pictures"] == custom_pictures
+    assert Path(by_prompt["Pick the dog"]["image"]).name == "task-04.png"
+    assert by_prompt["Pick the dog"]["pictures"] == custom_pictures
+
+    # passed_over[].image exclusion picked task-02.png.
+    assert Path(by_prompt["Pick the owl"]["image"]).name == "task-02.png"
+
+
+def test_record_retries_presence_error_and_filters_mixed_services(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """Verify presence.error triggers retry and mixed-service manifests filter cleanly by --captcha."""
+    # Direct unit test for _has_recording_error on presence.error.
+    assert _has_recording_error(
+        {
+            "status": "answered",
+            "vllm_components": {
+                "presence": {"error": "HTTP 400 Bad Request", "minimum": 0.0, "skipped": False},
+            },
+        }
+    ) == "presence: HTTP 400 Bad Request"
+    assert _has_recording_error(
+        {
+            "status": "answered",
+            "jev_components": {
+                "presence": {"error": "timeout"},
+            },
+        }
+    ) == "presence: timeout"
+    assert _has_recording_error(
+        {
+            "status": "answered",
+            "vllm_components": {"presence": {"probability": 0.85, "minimum": 0.7, "skipped": False}},
+        }
+    ) is None
+
+    rc_img = tmp_path / "rc1.png"
+    hc_img = tmp_path / "hc1.png"
+    rc_img.write_bytes(TINY_PNG + b"rc")
+    hc_img.write_bytes(TINY_PNG + b"hc")
+    ds_path = tmp_path / "mixed.jsonl"
+    ds_rows = [
+        {"id": "hc-1", "group_id": "gh1", "service": "hcaptcha", "layout": 3, "prompt": "Pick the tiger", "image": "hc1.png", "pictures": UNIFORM_3X3_PICTURES},
+        {"id": "rc-1", "group_id": "gr1", "service": "recaptcha", "layout": 4, "prompt": "Select all squares with\nbuses\nIf there are none, click skip", "image": "rc1.png"},
+    ]
+    ds_path.write_text("\n".join(json.dumps(r) for r in ds_rows) + "\n", encoding="utf-8")
+
+    calls: list[dict[str, Any]] = []
+
+    class MockServer(BaseHTTPRequestHandler):
+        def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
+            return
+
+        def do_POST(self) -> None:  # noqa: N802
+            length = int(self.headers.get("Content-Length", "0"))
+            req = json.loads(self.rfile.read(length).decode("utf-8"))
+            calls.append(req)
+            probs = {str(i): 0.5 for i in range(1, 17)}
+            # First call returns presence.error (must be retried); second call succeeds.
+            if len(calls) == 1:
+                presence_obj: dict[str, Any] = {"error": "HTTP 503 transient", "minimum": 0.0, "skipped": False}
+            else:
+                presence_obj = {"probability": 0.91, "minimum": 0.0, "skipped": False}
+            body = json.dumps(
+                {
+                    "result": {
+                        "status": "answered",
+                        "prediction": {"type": "tiles", "value": [1]},
+                        "vllm_components": {
+                            "whole_grid": {"tile_probabilities": probs},
+                            "variant": {
+                                "tile_probabilities": probs,
+                                "passes": [{"grid_pixels": [389, 389], "tile_probabilities": probs}],
+                            },
+                            "presence": presence_obj,
+                        },
+                    }
+                }
+            ).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), MockServer)
+    port = server.server_address[1]
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        out_path = tmp_path / "rec_rc.jsonl"
+        # --limit 1 must apply AFTER service filtering so rc-1 is recorded even though hc-1 appears first!
+        rc = cli_main(
+            [
+                "record",
+                "--dataset",
+                str(ds_path),
+                "-o",
+                str(out_path),
+                "--captcha",
+                "recaptcha",
+                "--limit",
+                "1",
+                "--workers",
+                "1",
+                "--retries",
+                "3",
+                "--server-url",
+                f"http://127.0.0.1:{port}",
+            ]
+        )
+        assert rc == 0
+        captured_stdout = capsys.readouterr().out
+        assert "1 other-service skipped" in captured_stdout
+        assert len(calls) == 2  # 1st failed with presence.error, 2nd succeeded
+        assert all("layout" in c and c["layout"] == 4 for c in calls)
+        written = [json.loads(line) for line in out_path.read_text(encoding="utf-8").splitlines()]
+        assert len(written) == 1
+        assert written[0]["grid_id"] == "rc-1"
+        assert "error" not in written[0]["result"]["vllm_components"]["presence"]
+
+        # Requesting a service with 0 matching rows fails clearly.
+        rc_only = tmp_path / "rc_only.jsonl"
+        rc_only.write_text(json.dumps(ds_rows[1]) + "\n", encoding="utf-8")
+        with pytest.raises(ValueError, match="no dataset items match service 'hcaptcha'"):
+            record_dataset(rc_only, tmp_path / "none.jsonl", service="hcaptcha", server_url=f"http://127.0.0.1:{port}")
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_schema_and_export_rust_parity_validations(tmp_path: Path) -> None:
+    """Verify TOML schema parity with Rust: shipped TOMLs, hCaptcha defaults, base_url, headers, max_images, pass_index."""
+    # All shipped models/**/*.toml must load and validate cleanly.
+    shipped_tomls = sorted((REPO_ROOT / "models").rglob("*.toml"))
+    assert len(shipped_tomls) >= 6
+    for toml_path in shipped_tomls:
+        cfg = load_model_config(toml_path)
+        assert cfg.schema_version == 1
+
+    # hCaptcha export without 3x3 fit defaults to default_decision = "average".
+    hc_toml = tmp_path / "hc_default.toml"
+    assert (
+        cli_main(
+            [
+                "export",
+                "--service",
+                "hcaptcha",
+                "--name",
+                "Custom/hc-model",
+                "--provider",
+                "custom",
+                "--model-id",
+                "hc-1",
+                "--dialect",
+                "systemone-assets",
+                "--base-url",
+                "https://api.example.com/v1",
+                "--api-key-env",
+                "HC_API_KEY",
+                "-o",
+                str(hc_toml),
+            ]
+        )
+        == 0
+    )
+    hc_cfg = load_model_config(hc_toml)
+    assert hc_cfg.tuning is not None
+    assert hc_cfg.tuning.default_decision == "average"
+
+    # hCaptcha export WITH 3x3 fit defaults to default_decision = "logistic".
+    ds_path, lbl_path, rec_path = _build_synthetic_pipeline_files(tmp_path)
+    fit_path = tmp_path / "fit.json"
+    sweep_path = tmp_path / "sweep.json"
+    assert cli_main(["fit", "--dataset", str(ds_path), "--labels", str(lbl_path), "--recordings", str(rec_path), "-o", str(fit_path)]) == 0
+    assert (
+        cli_main(
+            [
+                "sweep",
+                "--dataset",
+                str(ds_path),
+                "--labels",
+                str(lbl_path),
+                "--recordings",
+                str(rec_path),
+                "--fit",
+                str(fit_path),
+                "--fast",
+                "--boot",
+                "50",
+                "-o",
+                str(sweep_path),
+            ]
+        )
+        == 0
+    )
+
+    hc_fitted_toml = tmp_path / "hc_fitted.toml"
+    export_model(
+        service="hcaptcha",
+        name="vLLM/hc-fitted",
+        provider="vllm",
+        model_id="vllm-sr/d3-ultra",
+        fit_path=fit_path,
+        output_toml=hc_fitted_toml,
+    )
+    hc_fitted_cfg = load_model_config(hc_fitted_toml)
+    assert hc_fitted_cfg.tuning is not None
+    assert hc_fitted_cfg.tuning.default_decision == "logistic"
+    assert hc_fitted_cfg.tuning.logistic_3x3 is not None
+
+    # hCaptcha export with sweep only (no 3x3 fit) still defaults to "average".
+    hc_sweep_toml = tmp_path / "hc_sweep.toml"
+    export_model(
+        service="hcaptcha",
+        name="vLLM/hc-sweep",
+        provider="vllm",
+        model_id="vllm-sr/d3-ultra",
+        sweep_path=sweep_path,
+        output_toml=hc_sweep_toml,
+    )
+    hc_sweep_cfg = load_model_config(hc_sweep_toml)
+    assert hc_sweep_cfg.tuning is not None
+    assert hc_sweep_cfg.tuning.default_decision == "average"
+
+    # Explicit --service hcaptcha --default-decision logistic without 3x3 fit fails clearly.
+    with pytest.raises(ValueError, match="3x3 logistic fit"):
+        export_model(
+            service="hcaptcha",
+            name="vLLM/hc-bad",
+            provider="vllm",
+            model_id="vllm-sr/d3-ultra",
+            default_decision="logistic",
+            output_toml=tmp_path / "hc_bad.toml",
+        )
+
+    # endpoint.base_url validation parity with Rust.
+    bad_urls = [
+        "ftp://bad.example.com/v1",
+        "https://example.com/v1?x=1",
+        "https://example.com/v1?",
+        "https://example.com/v1#frag",
+        "https://user:pass@example.com/v1",
+        "https:///missing-host",
+        "not-a-url",
+        "https://example.com:99999/v1",
+    ]
+    for bad_url in bad_urls:
+        cfg_bad_url = ModelConfig(
+            schema_version=1,
+            service="recaptcha",
+            name="Custom/bad-url",
+            provider="custom",
+            model_id="m1",
+            endpoint=EndpointConfig(
+                dialect="systemone-assets",
+                base_url=bad_url,
+                api_key_env="KEY",
+            ),
+        )
+        with pytest.raises(ValueError, match="base_url"):
+            validate_model_config(cfg_bad_url)
+
+    # endpoint.extra_headers validation parity with Rust.
+    bad_headers_cases = [
+        {"": "val"},
+        {"Bad Header": "val"},
+        {"Bad:Header": "val"},
+        {"X-Test": ""},
+        {"X-Test": "   "},
+        {"X-Test": "line1\r\nline2"},
+        {"X-Test": "caf\u00e9"},
+    ]
+    for bad_headers in bad_headers_cases:
+        cfg_bad_hdr = ModelConfig(
+            schema_version=1,
+            service="recaptcha",
+            name="vLLM/bad-hdr",
+            provider="vllm",
+            model_id="m1",
+            endpoint=EndpointConfig(extra_headers=bad_headers),
+        )
+        with pytest.raises(ValueError, match="extra_headers"):
+            validate_model_config(cfg_bad_hdr)
+
+    # max_images >= 2 for systemone-images (both liquid default dialect & explicit dialect), >= 1 for systemone-assets.
+    for cfg_max1_img in (
+        ModelConfig(
+            schema_version=1,
+            service="recaptcha",
+            name="Liquid/bad-max",
+            provider="liquid",
+            model_id="d1.2",
+            endpoint=EndpointConfig(max_images=1),
+        ),
+        ModelConfig(
+            schema_version=1,
+            service="recaptcha",
+            name="Custom/bad-max",
+            provider="custom",
+            model_id="m1",
+            endpoint=EndpointConfig(
+                dialect="systemone-images",
+                base_url="https://api.example.com/v1",
+                api_key_env="KEY",
+                max_images=1,
+            ),
+        ),
+    ):
+        with pytest.raises(ValueError, match="max_images.*2.*systemone-images"):
+            validate_model_config(cfg_max1_img)
+
+    # max_images = 1 is valid for systemone-assets, max_images = 2 is valid for systemone-images.
+    validate_model_config(
+        ModelConfig(
+            schema_version=1,
+            service="recaptcha",
+            name="vLLM/min-assets",
+            provider="vllm",
+            model_id="m1",
+            endpoint=EndpointConfig(max_images=1),
+        )
+    )
+    validate_model_config(
+        ModelConfig(
+            schema_version=1,
+            service="recaptcha",
+            name="Liquid/min-images",
+            provider="liquid",
+            model_id="d1.2",
+            endpoint=EndpointConfig(max_images=2),
+        )
+    )
+
+    # Nonexistent --pass-index in write_parity_fixture raises clearly instead of falling back.
+    rc_toml = tmp_path / "rc_for_fx.toml"
+    export_model(
+        service="recaptcha",
+        name="vLLM/fx-test",
+        provider="vllm",
+        model_id="vllm-sr/d3-ultra",
+        sweep_path=sweep_path,
+        fit_path=fit_path,
+        output_toml=rc_toml,
+    )
+    rc_cfg = load_model_config(rc_toml)
+    with pytest.raises(ValueError, match=r"pass_index=99.*\[0, 1\]"):
+        write_parity_fixture(rc_cfg, rec_path, tmp_path / "bad_pass.json.gz", pass_index=99)
+    with pytest.raises(ValueError, match="pass_index must be >= 0"):
+        write_parity_fixture(rc_cfg, rec_path, tmp_path / "neg_pass.json.gz", pass_index=-1)
+    fx_p1 = tmp_path / "pass1.json.gz"
+    info_p1 = write_parity_fixture(rc_cfg, rec_path, fx_p1, pass_index=1)
+    assert info_p1["grids"] == 24
+
+
+def test_label_server_regressions_layout_filter_ipv6_host_and_repeat_check_mkdir(tmp_path: Path) -> None:
+    """Verify LabelStore --layout label filtering, IPv6 [::1] Host check, and --repeat-check --json mkdir."""
+    # Direct Host header validation checks.
+    assert _is_loopback_host_header("127.0.0.1:8787")
+    assert _is_loopback_host_header("localhost:8787")
+    assert _is_loopback_host_header("[::1]:8787")
+    assert _is_loopback_host_header("[::1]")
+    assert not _is_loopback_host_header("evil.example.com:8787")
+    assert not _is_loopback_host_header("127.0.0.1@evil.example.com")
+    assert not _is_loopback_host_header("[::1]:notaport")
+    assert not _is_loopback_host_header("127.0.0.1/path")
+
+    img3 = tmp_path / "g3.png"
+    img4 = tmp_path / "g4.png"
+    img3.write_bytes(TINY_PNG)
+    img4.write_bytes(TINY_PNG)
+    ds_path = tmp_path / "ds_mixed_layout.jsonl"
+    ds_path.write_text(
+        "\n".join(
+            json.dumps(x)
+            for x in [
+                {"id": "g3", "group_id": "t3", "service": "recaptcha", "layout": 3, "prompt": "Select all images with\nbicycles", "image": "g3.png"},
+                {"id": "g4", "group_id": "t4", "service": "recaptcha", "layout": 4, "prompt": "Select all squares with\nbuses", "image": "g4.png"},
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    labels_path = tmp_path / "labels_mixed.jsonl"
+    labels_path.write_text(
+        "\n".join(
+            json.dumps(x)
+            for x in [
+                {"id": "g3", "layout": 3, "target": [1], "sliver": [], "unclear": False},
+                {"id": "g4", "layout": 4, "target": [2], "sliver": [], "unclear": False},
+                {"id": "stale-other", "layout": 4, "target": [3], "sliver": [], "unclear": False},
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    store4 = LabelStore(ds_path, labels_path, layout=4)
+    assert list(store4.get_labels().keys()) == ["g4"]
+
+    server = create_label_server(ds_path, labels_path, port=0, layout=4)
+    port = server.server_address[1]
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        base = f"http://127.0.0.1:{port}"
+        with httpx.Client(trust_env=False) as client:
+            # /api/labels filters to layout=4 items only.
+            resp_labels = client.get(f"{base}/api/labels")
+            assert resp_labels.status_code == 200
+            assert list(resp_labels.json().keys()) == ["g4"]
+
+            # IPv6 loopback Host header is accepted.
+            resp_v6 = client.get(f"{base}/api/items", headers={"Host": f"[::1]:{port}"})
+            assert resp_v6.status_code == 200
+            assert [it["id"] for it in resp_v6.json()] == ["g4"]
+
+            # Non-loopback Host header is rejected with 403.
+            resp_bad = client.get(f"{base}/api/items", headers={"Host": f"evil.com:{port}"})
+            assert resp_bad.status_code == 403
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    # --repeat-check --json creates missing parent directories automatically.
+    nested_json = tmp_path / "deep" / "nested" / "repeat_report.json"
+    assert (
+        cli_main(
+            [
+                "label",
+                "--repeat-check",
+                str(labels_path),
+                str(labels_path),
+                "--json",
+                str(nested_json),
+            ]
+        )
+        == 0
+    )
+    assert nested_json.is_file()
+    rep = json.loads(nested_json.read_text(encoding="utf-8"))
+    assert rep["common_grids"] == 3
+
+
+def test_folds_and_boot_validation_in_schema_fit_and_sweep(tmp_path: Path) -> None:
+    """Verify n_folds >= 2 and --boot >= 1 are enforced in Python APIs and CLIs."""
+    with pytest.raises(ValueError, match="n_folds must be >= 2"):
+        make_group_folds(["g1", "g2", "g3"], n_folds=0)
+    with pytest.raises(ValueError, match="n_folds must be >= 2"):
+        make_group_folds(["g1", "g2", "g3"], n_folds=1)
+
+    with pytest.raises(ValueError, match="n_boot must be >= 1"):
+        grouped_bootstrap_diff(
+            np.array([0, 1]),
+            2,
+            np.array([[True, False]]),
+            np.array([[False, False]]),
+            n_boot=0,
+        )
+
+    ds_path, lbl_path, rec_path = _build_synthetic_pipeline_files(tmp_path)
+
+    for bad_folds in (0, 1, -2):
+        with pytest.raises(ValueError, match="folds must be >= 2"):
+            fit_dataset(ds_path, lbl_path, rec_path, folds=bad_folds)
+        with pytest.raises(ValueError, match="folds must be >= 2"):
+            sweep_4x4(ds_path, lbl_path, rec_path, folds=bad_folds, fast=True, n_boot=10)
+        with pytest.raises(SystemExit) as exc_fit:
+            cli_main(
+                [
+                    "fit",
+                    "--dataset",
+                    str(ds_path),
+                    "--labels",
+                    str(lbl_path),
+                    "--recordings",
+                    str(rec_path),
+                    "--folds",
+                    str(bad_folds),
+                ]
+            )
+        assert exc_fit.value.code == 2
+        with pytest.raises(SystemExit) as exc_sweep:
+            cli_main(
+                [
+                    "sweep",
+                    "--dataset",
+                    str(ds_path),
+                    "--labels",
+                    str(lbl_path),
+                    "--recordings",
+                    str(rec_path),
+                    "-o",
+                    str(tmp_path / "unused.json"),
+                    "--folds",
+                    str(bad_folds),
+                ]
+            )
+        assert exc_sweep.value.code == 2
+
+    for bad_boot in (0, -5):
+        with pytest.raises(ValueError, match="n_boot must be >= 1"):
+            sweep_4x4(ds_path, lbl_path, rec_path, n_boot=bad_boot, fast=True)
+        with pytest.raises(SystemExit) as exc_boot:
+            cli_main(
+                [
+                    "sweep",
+                    "--dataset",
+                    str(ds_path),
+                    "--labels",
+                    str(lbl_path),
+                    "--recordings",
+                    str(rec_path),
+                    "-o",
+                    str(tmp_path / "unused.json"),
+                    "--boot",
+                    str(bad_boot),
+                ]
+            )
+        assert exc_boot.value.code == 2

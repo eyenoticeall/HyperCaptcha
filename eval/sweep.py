@@ -64,6 +64,19 @@ FAST_CONF_EVERY = (0.3, 0.5)
 FAST_CONF_WINDOWS = (0.3, 0.5)
 
 
+def _min_int(minimum: int):
+    def _parse(raw: str) -> int:
+        try:
+            value = int(raw)
+        except ValueError as exc:
+            raise argparse.ArgumentTypeError(f"invalid int value: {raw!r}") from exc
+        if value < minimum:
+            raise argparse.ArgumentTypeError(f"must be >= {minimum}, got {value}")
+        return value
+
+    return _parse
+
+
 def grouped_bootstrap_diff(
     group_indices: np.ndarray,
     n_groups: int,
@@ -74,6 +87,8 @@ def grouped_bootstrap_diff(
     seed: int = 11,
 ) -> dict[str, float]:
     """Paired grouped bootstrap 95% CI for `(a - b)` grids right per pass (`lib.py:boot`)."""
+    if isinstance(n_boot, bool) or n_boot < 1:
+        raise ValueError(f"n_boot must be >= 1, got {n_boot}")
     d = (a.astype(np.float64) - b.astype(np.float64)).mean(axis=0)
     per_group = np.zeros(n_groups, dtype=np.float64)
     np.add.at(per_group, group_indices, d)
@@ -715,6 +730,10 @@ def sweep_4x4(
     include_unclear: bool = False,
 ) -> dict[str, Any]:
     """Run the full 4x4 effort-tier sweep and return structured results + markdown table."""
+    if isinstance(folds, bool) or folds < 2:
+        raise ValueError(f"folds must be >= 2, got {folds}")
+    if isinstance(n_boot, bool) or n_boot < 1:
+        raise ValueError(f"n_boot must be >= 1, got {n_boot}")
     D = _load_sweep_data(dataset_path, labels_path, recordings_path, include_unclear=include_unclear)
     R, G = D["R"], D["G"]
     gi, fold_arr, n_groups, k_folds = make_group_folds(D["group_ids"], n_folds=folds, seed=seed)
@@ -1010,9 +1029,9 @@ def add_subparser(subparsers: argparse._SubParsersAction) -> argparse.ArgumentPa
     parser.add_argument("-o", "--output", required=True, help="Path to write sweep_result.json.")
     parser.add_argument("--fit", help="Optional fit.json supplying pre-fitted 4x4 weights.")
     parser.add_argument("--weights", help="Optional comma-separated 5 fixed 4x4 logistic weights.")
-    parser.add_argument("--folds", type=int, default=5, help="Grouped CV fold count (default 5).")
+    parser.add_argument("--folds", type=_min_int(2), default=5, help="Grouped CV fold count (>= 2, default 5).")
     parser.add_argument("--seed", type=int, default=7, help="Deterministic CV seed (default 7).")
-    parser.add_argument("--boot", type=int, default=4000, help="Bootstrap resamples for 95%% CIs (default 4000).")
+    parser.add_argument("--boot", type=_min_int(1), default=4000, help="Bootstrap resamples for 95%% CIs (>= 1, default 4000).")
     parser.add_argument("--fast", action="store_true", help="Use a coarser parameter grid for quick smoke sweeps.")
     parser.add_argument(
         "--no-collapse",

@@ -181,7 +181,8 @@ def _extract_ladder_data(
     sweep_data: Mapping[str, Any] | None,
     fit_data: Mapping[str, Any] | None,
     *,
-    default_decision: str,
+    service: str = "recaptcha",
+    default_decision: str | None = None,
 ) -> TuningConfig | None:
     logistic_3x3: Logistic3x3 | None = None
     logistic_4x4: tuple[float, float, float, float, float] | None = None
@@ -240,10 +241,25 @@ def _extract_ladder_data(
                 skip_below=efforts.low.skip_below,
             )
 
+    if default_decision is None:
+        if service == "hcaptcha":
+            resolved_decision = "logistic" if logistic_3x3 is not None else "average"
+        else:
+            resolved_decision = (
+                "logistic" if (logistic_3x3 is not None or logistic_4x4 is not None) else "average"
+            )
+    else:
+        resolved_decision = default_decision
+
+    if service == "hcaptcha" and resolved_decision == "logistic" and logistic_3x3 is None:
+        raise ValueError("hcaptcha default_decision='logistic' requires a 3x3 logistic fit (--fit)")
+
     if logistic_3x3 is None and logistic_4x4 is None and average_4x4 is None and efforts is None:
+        if default_decision is not None or service == "hcaptcha":
+            return TuningConfig(default_decision=resolved_decision)
         return None
     return TuningConfig(
-        default_decision=default_decision,
+        default_decision=resolved_decision,
         logistic_3x3=logistic_3x3,
         logistic_4x4=logistic_4x4,
         average_4x4=average_4x4,
@@ -265,11 +281,15 @@ def write_parity_fixture(
     if cfg.tuning.default_decision == "logistic" and cfg.tuning.logistic_4x4 is None:
         raise ValueError("logistic parity fixture requires tuning.logistic_4x4 weights")
 
+    if pass_index < 0:
+        raise ValueError(f"pass_index must be >= 0, got {pass_index}")
+
     allowed_ids: set[str] | None = None
     if dataset_path is not None:
         allowed_ids = {str(item["id"]) for item in load_dataset(dataset_path, layout=4)}
 
     by_grid: dict[str, dict[str, Any]] = {}
+    seen_passes: set[int] = set()
     for raw in read_jsonl(recordings_path):
         if int(raw.get("layout", 4)) != 4:
             continue
@@ -279,11 +299,16 @@ def write_parity_fixture(
         gid = parsed["grid_id"]
         if allowed_ids is not None and gid not in allowed_ids:
             continue
-        if parsed["pass_index"] == pass_index or gid not in by_grid:
-            if gid not in by_grid or parsed["pass_index"] == pass_index:
-                by_grid[gid] = parsed
+        seen_passes.add(parsed["pass_index"])
+        if parsed["pass_index"] == pass_index:
+            by_grid[gid] = parsed
 
     if not by_grid:
+        if seen_passes:
+            raise ValueError(
+                f"no 4x4 recordings found for pass_index={pass_index} "
+                f"(available pass_index values: {sorted(seen_passes)})"
+            )
         raise ValueError("no 4x4 recordings available to build parity fixture")
 
     efforts = cfg.tuning.efforts
@@ -353,7 +378,7 @@ def export_model(
     output_toml: str | Path,
     sweep_path: str | Path | None = None,
     fit_path: str | Path | None = None,
-    default_decision: str = "logistic",
+    default_decision: str | None = None,
     endpoint: EndpointConfig | None = None,
     fixture_path: str | Path | None = None,
     recordings_path: str | Path | None = None,
@@ -363,7 +388,12 @@ def export_model(
     """Export a validated TOML `ModelConfig` and optional deterministic parity fixture."""
     sweep_data = json.loads(Path(sweep_path).read_text(encoding="utf-8")) if sweep_path else None
     fit_data = json.loads(Path(fit_path).read_text(encoding="utf-8")) if fit_path else None
-    tuning = _extract_ladder_data(sweep_data, fit_data, default_decision=default_decision)
+    tuning = _extract_ladder_data(
+        sweep_data,
+        fit_data,
+        service=service,
+        default_decision=default_decision,
+    )
 
     cfg = ModelConfig(
         schema_version=1,
@@ -398,8 +428,8 @@ def _parse_extra_headers(items: Sequence[str]) -> dict[str, str]:
     headers: dict[str, str] = {}
     for item in items:
         key, sep, value = item.partition("=")
-        if not sep or not key.strip():
-            raise ValueError(f"--extra-header must be KEY=VALUE, got {item!r}")
+        if not sep or not key.strip() or not value.strip():
+            raise ValueError(f"--extra-header must be KEY=VALUE with non-empty key and value, got {item!r}")
         headers[key.strip()] = value.strip()
     return headers
 
@@ -415,7 +445,12 @@ def add_subparser(subparsers: argparse._SubParsersAction) -> argparse.ArgumentPa
     parser.add_argument("--name", required=True, help="Display/CLI model name, e.g. MyProvider/my-model.")
     parser.add_argument("--provider", choices=VALID_PROVIDERS, required=True, help="Model provider.")
     parser.add_argument("--model-id", required=True, help="Provider wire model ID.")
-    parser.add_argument("--default-decision", choices=VALID_DECISIONS, default="logistic", help="Default 4x4/3x3 decision rule.")
+    parser.add_argument(
+        "--default-decision",
+        choices=VALID_DECISIONS,
+        default=None,
+        help="Default 4x4/3x3 decision rule (defaults to 'average' for hcaptcha without a 3x3 fit, otherwise 'logistic' when fitted).",
+    )
     parser.add_argument("-o", "--output", required=True, help="Output path for the .toml ModelConfig.")
 
     # Optional [endpoint] fields (required when --provider custom).

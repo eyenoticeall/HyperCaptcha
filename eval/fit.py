@@ -331,6 +331,19 @@ def _fit_4x4_block(
     }
 
 
+def _min_int(minimum: int):
+    def _parse(raw: str) -> int:
+        try:
+            value = int(raw)
+        except ValueError as exc:
+            raise argparse.ArgumentTypeError(f"invalid int value: {raw!r}") from exc
+        if value < minimum:
+            raise argparse.ArgumentTypeError(f"must be >= {minimum}, got {value}")
+        return value
+
+    return _parse
+
+
 def fit_dataset(
     dataset_path: str | Path,
     labels_path: str | Path,
@@ -344,6 +357,8 @@ def fit_dataset(
     include_unclear: bool = False,
 ) -> dict[str, Any]:
     """Fit 3x3 and/or 4x4 ridge logistic rules with grouped K-fold cross-validation."""
+    if isinstance(folds, bool) or folds < 2:
+        raise ValueError(f"folds must be >= 2, got {folds}")
     layouts = (layout,) if layout is not None else (3, 4)
     summary: dict[str, Any] = {
         "folds": folds,
@@ -419,7 +434,7 @@ def add_subparser(subparsers: argparse._SubParsersAction) -> argparse.ArgumentPa
     parser.add_argument("--recordings", required=True, help="Path to recordings.jsonl.")
     parser.add_argument("-o", "--output", help="Optional path to write fit.json.")
     parser.add_argument("--layout", type=int, choices=(3, 4), help="Fit only 3x3 or 4x4 grids.")
-    parser.add_argument("--folds", type=int, default=5, help="Number of grouped CV folds (default 5).")
+    parser.add_argument("--folds", type=_min_int(2), default=5, help="Number of grouped CV folds (>= 2, default 5).")
     parser.add_argument("--seed", type=int, default=7, help="Deterministic CV fold RNG seed (default 7).")
     parser.add_argument("--lam", type=float, default=1.0, help="Ridge L2 penalty strength (default 1.0).")
     parser.add_argument("--slivers-empty", action="store_true", help="Treat sliver squares as empty during training.")

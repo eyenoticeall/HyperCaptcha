@@ -188,9 +188,16 @@ def _has_recording_error(result: Any) -> str | None:
         return str(result.get("error") or result.get("detail") or result.get("status"))
     comp = result.get("vllm_components") or result.get("jev_components") or {}
     if isinstance(comp, dict):
-        box_err = (comp.get("boxes") or {}).get("error")
-        if box_err:
-            return f"boxes: {box_err}"
+        pres = comp.get("presence")
+        if isinstance(pres, dict):
+            pres_err = pres.get("error")
+            if pres_err:
+                return f"presence: {pres_err}"
+        boxes = comp.get("boxes")
+        if isinstance(boxes, dict):
+            box_err = boxes.get("error")
+            if box_err:
+                return f"boxes: {box_err}"
     return None
 
 
@@ -223,18 +230,33 @@ def record_dataset(
         raise ValueError("passes must be >= 1")
     if workers < 1:
         raise ValueError("workers must be >= 1")
+    if retries < 1:
+        raise ValueError("retries must be >= 1")
 
     ds_path = Path(dataset_path).resolve()
     out_path = Path(output_path).resolve()
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    items = load_dataset(ds_path, layout=layout)
+    all_items = load_dataset(ds_path, layout=layout)
+    if not all_items:
+        return {
+            "total_jobs": 0,
+            "skipped_existing": 0,
+            "skipped_service": 0,
+            "recorded": 0,
+            "failed": [],
+        }
+
+    inferred_service = service or str(all_items[0].get("service", "recaptcha"))
+    items = [it for it in all_items if str(it.get("service", "recaptcha")) == inferred_service]
+    skipped_service = len(all_items) - len(items)
+    if not items:
+        raise ValueError(
+            f"no dataset items match service {inferred_service!r} "
+            f"(skipped {skipped_service} item(s) from other service(s))"
+        )
     if limit is not None:
         items = items[:limit]
-    if not items:
-        return {"total_jobs": 0, "skipped_existing": 0, "recorded": 0, "failed": []}
-
-    inferred_service = service or str(items[0].get("service", "recaptcha"))
 
     done: set[tuple[str, int]] = set()
     if out_path.exists():
@@ -254,6 +276,7 @@ def record_dataset(
         return {
             "total_jobs": len(items) * passes,
             "skipped_existing": skipped_existing,
+            "skipped_service": skipped_service,
             "recorded": 0,
             "failed": [],
         }
@@ -357,6 +380,7 @@ def record_dataset(
     return {
         "total_jobs": len(items) * passes,
         "skipped_existing": skipped_existing,
+        "skipped_service": skipped_service,
         "recorded": recorded,
         "failed": failed,
     }
@@ -412,9 +436,14 @@ def run(args: argparse.Namespace) -> int:
         extra_args=args.extra_arg,
         limit=args.limit,
     )
+    extra = (
+        f", {stats['skipped_service']} other-service skipped"
+        if stats.get("skipped_service")
+        else ""
+    )
     print(
         f"Recorded {stats['recorded']} new rounds to {args.output} "
-        f"(skipped {stats['skipped_existing']} existing, {len(stats['failed'])} failed)."
+        f"(skipped {stats['skipped_existing']} existing{extra}, {len(stats['failed'])} failed)."
     )
     if stats["failed"]:
         for item in stats["failed"][:5]:

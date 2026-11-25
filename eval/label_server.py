@@ -70,7 +70,7 @@ class LabelStore:
 
     def get_labels(self) -> dict[str, dict[str, Any]]:
         with self._lock:
-            return {k: dict(v) for k, v in self.labels.items()}
+            return {k: dict(v) for k, v in self.labels.items() if k in self.item_by_id}
 
     def get_image_bytes(self, item_id: str) -> tuple[bytes, str] | None:
         path = self.image_by_id.get(item_id)
@@ -121,6 +121,24 @@ class LabelStore:
         return record
 
 
+def _is_loopback_host_header(host_header: str | None) -> bool:
+    """Return True if an HTTP Host header names a loopback host (IPv4, localhost, or [::1])."""
+    host = (host_header or "").strip()
+    if not host:
+        return True
+    if any(ch.isspace() for ch in host):
+        return False
+    try:
+        parts = urlsplit(f"http://{host}")
+        _ = parts.port
+    except ValueError:
+        return False
+    if parts.username is not None or parts.password is not None or parts.path or parts.query or parts.fragment:
+        return False
+    hostname = (parts.hostname or "").lower()
+    return hostname in LOOPBACK_HOSTS
+
+
 def create_label_server(
     dataset_path: str | Path,
     labels_path: str | Path,
@@ -137,11 +155,7 @@ def create_label_server(
             return
 
         def _check_loopback_host(self) -> bool:
-            host = (self.headers.get("Host") or "").strip()
-            if not host:
-                return True
-            hostname = host.split(":", 1)[0].strip("[]").lower()
-            return hostname in LOOPBACK_HOSTS
+            return _is_loopback_host_header(self.headers.get("Host"))
 
         def _send_bytes(self, status: int, body: bytes, content_type: str) -> None:
             self.send_response(status)
@@ -332,7 +346,9 @@ def run(args: argparse.Namespace) -> int:
             exclude_unclear=not args.include_unclear,
         )
         if args.json_out:
-            Path(args.json_out).write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+            out_path = Path(args.json_out)
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            out_path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
         n = report["common_grids"]
         print(f"Repeatability check over {n} common grids (excluded unclear: {report['excluded_unclear']}):")
         if n:
