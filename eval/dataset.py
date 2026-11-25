@@ -189,7 +189,7 @@ def build_dataset(
     for trials_path, run_dir, source_run in trial_files:
         rows = read_jsonl(trials_path)
         for trial_idx, trial in enumerate(rows):
-            # Support both bare trial dicts (chrome_lab/hcaptcha_lab) and tagged logs (`kind: "trial"`).
+            # Support both bare trial dicts (recaptcha_lab/hcaptcha_lab) and tagged logs (`kind: "trial"`).
             if "kind" in trial and trial["kind"] != "trial":
                 continue
             rounds = trial.get("rounds")
@@ -290,7 +290,7 @@ def add_subparser(subparsers: argparse._SubParsersAction) -> argparse.ArgumentPa
     parser.add_argument(
         "inputs",
         nargs="+",
-        help="One or more chrome_lab / hcaptcha_lab run directories or trials.jsonl files.",
+        help="One or more recaptcha_lab / hcaptcha_lab run directories or trials.jsonl files.",
     )
     parser.add_argument(
         "-o",
@@ -306,6 +306,8 @@ def add_subparser(subparsers: argparse._SubParsersAction) -> argparse.ArgumentPa
     )
     parser.add_argument(
         "--service",
+        "--captcha",
+        dest="service",
         choices=("recaptcha", "hcaptcha"),
         help="Include only grids from one CAPTCHA service.",
     )

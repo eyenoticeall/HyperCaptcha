@@ -31,6 +31,7 @@ from eval.schema import (
     VALID_SERVICES,
     decide_4x4,
     load_dataset,
+    load_model_config,
     parse_recording_entry,
     read_jsonl,
     validate_model_config,
@@ -94,7 +95,7 @@ def _emit_plan_section(lines: list[str], header: str, plan: Plan) -> None:
 
 
 def render_model_toml(cfg: ModelConfig) -> str:
-    """Serialize a validated `ModelConfig` to canonical TOML matching `rust-core`."""
+    """Serialize a validated `ModelConfig` to canonical TOML matching the Rust schema."""
     validate_model_config(cfg)
     lines: list[str] = [
         f"schema_version = {int(cfg.schema_version)}",
@@ -369,13 +370,63 @@ def write_parity_fixture(
     return {"grids": len(rows), "bytes": out_path.stat().st_size, "path": str(out_path)}
 
 
+def _merge_endpoint(
+    base: EndpointConfig | None,
+    override: EndpointConfig | None,
+) -> EndpointConfig | None:
+    if base is None:
+        return override
+    if override is None:
+        return base
+    merged_headers = dict(base.extra_headers)
+    merged_headers.update(override.extra_headers)
+    return EndpointConfig(
+        dialect=override.dialect if override.dialect is not None else base.dialect,
+        base_url=override.base_url if override.base_url is not None else base.base_url,
+        api_key_env=override.api_key_env if override.api_key_env is not None else base.api_key_env,
+        extra_api_keys_env=(
+            override.extra_api_keys_env
+            if override.extra_api_keys_env is not None
+            else base.extra_api_keys_env
+        ),
+        image_format=override.image_format if override.image_format is not None else base.image_format,
+        crop_filter=override.crop_filter if override.crop_filter is not None else base.crop_filter,
+        gzip=override.gzip if override.gzip is not None else base.gzip,
+        max_images=override.max_images if override.max_images is not None else base.max_images,
+        multi_state_windows=(
+            override.multi_state_windows
+            if override.multi_state_windows is not None
+            else base.multi_state_windows
+        ),
+        supports_every_box=(
+            override.supports_every_box
+            if override.supports_every_box is not None
+            else base.supports_every_box
+        ),
+        return_meta=override.return_meta if override.return_meta is not None else base.return_meta,
+        hedge_on_stall=override.hedge_on_stall if override.hedge_on_stall is not None else base.hedge_on_stall,
+        warm_connections=(
+            override.warm_connections
+            if override.warm_connections is not None
+            else base.warm_connections
+        ),
+        min_patch_tokens=(
+            override.min_patch_tokens
+            if override.min_patch_tokens is not None
+            else base.min_patch_tokens
+        ),
+        extra_headers=merged_headers,
+    )
+
+
 def export_model(
     *,
-    service: str,
-    name: str,
-    provider: str,
-    model_id: str,
     output_toml: str | Path,
+    service: str | None = None,
+    name: str | None = None,
+    provider: str | None = None,
+    model_id: str | None = None,
+    base_config_path: str | Path | None = None,
     sweep_path: str | Path | None = None,
     fit_path: str | Path | None = None,
     default_decision: str | None = None,
@@ -386,22 +437,45 @@ def export_model(
     pass_index: int = 0,
 ) -> dict[str, Any]:
     """Export a validated TOML `ModelConfig` and optional deterministic parity fixture."""
+    base_cfg = load_model_config(base_config_path) if base_config_path is not None else None
+    resolved_service = service if service is not None else (base_cfg.service if base_cfg is not None else "recaptcha")
+    resolved_name = name if name is not None else (base_cfg.name if base_cfg is not None else None)
+    resolved_provider = provider if provider is not None else (base_cfg.provider if base_cfg is not None else None)
+    resolved_model_id = model_id if model_id is not None else (base_cfg.model_id if base_cfg is not None else None)
+
+    missing = [
+        flag
+        for flag, value in (
+            ("--name", resolved_name),
+            ("--provider", resolved_provider),
+            ("--model-id", resolved_model_id),
+        )
+        if value is None
+    ]
+    if missing:
+        raise ValueError(
+            f"missing required option(s): {', '.join(missing)} (pass them directly or via --base-config)"
+        )
+
+    assert resolved_name is not None and resolved_provider is not None and resolved_model_id is not None
+    merged_endpoint = _merge_endpoint(base_cfg.endpoint if base_cfg is not None else None, endpoint)
+
     sweep_data = json.loads(Path(sweep_path).read_text(encoding="utf-8")) if sweep_path else None
     fit_data = json.loads(Path(fit_path).read_text(encoding="utf-8")) if fit_path else None
     tuning = _extract_ladder_data(
         sweep_data,
         fit_data,
-        service=service,
+        service=resolved_service,
         default_decision=default_decision,
     )
 
     cfg = ModelConfig(
         schema_version=1,
-        service=service,
-        name=name,
-        provider=provider,
-        model_id=model_id,
-        endpoint=endpoint,
+        service=resolved_service,
+        name=resolved_name,
+        provider=resolved_provider,
+        model_id=resolved_model_id,
+        endpoint=merged_endpoint,
         tuning=tuning,
     )
     toml_text = render_model_toml(cfg)
@@ -439,12 +513,23 @@ def add_subparser(subparsers: argparse._SubParsersAction) -> argparse.ArgumentPa
         "export",
         help="Export a validated Rust-compatible TOML ModelConfig and optional .json.gz parity fixture.",
     )
+    parser.add_argument(
+        "--base-config",
+        help="Optional starter TOML ModelConfig to inherit service, name, provider, model_id, and [endpoint] from (explicit CLI flags override).",
+    )
     parser.add_argument("--sweep", help="Path to sweep_result.json or hand-edited ladder JSON.")
     parser.add_argument("--fit", help="Optional fit.json supplying logistic_3x3 (and/or fallback logistic_4x4).")
-    parser.add_argument("--service", choices=VALID_SERVICES, default="recaptcha", help="Target CAPTCHA service.")
-    parser.add_argument("--name", required=True, help="Display/CLI model name, e.g. MyProvider/my-model.")
-    parser.add_argument("--provider", choices=VALID_PROVIDERS, required=True, help="Model provider.")
-    parser.add_argument("--model-id", required=True, help="Provider wire model ID.")
+    parser.add_argument(
+        "--service",
+        "--captcha",
+        dest="service",
+        choices=VALID_SERVICES,
+        default=None,
+        help="Target CAPTCHA service (defaults to --base-config's service, or 'recaptcha').",
+    )
+    parser.add_argument("--name", help="Display/CLI model name, e.g. MyProvider/my-model (optional with --base-config).")
+    parser.add_argument("--provider", choices=VALID_PROVIDERS, help="Model provider (optional with --base-config).")
+    parser.add_argument("--model-id", help="Provider wire model ID (optional with --base-config).")
     parser.add_argument(
         "--default-decision",
         choices=VALID_DECISIONS,
@@ -453,7 +538,7 @@ def add_subparser(subparsers: argparse._SubParsersAction) -> argparse.ArgumentPa
     )
     parser.add_argument("-o", "--output", required=True, help="Output path for the .toml ModelConfig.")
 
-    # Optional [endpoint] fields (required when --provider custom).
+    # Optional [endpoint] fields (required when --provider custom unless inherited from --base-config).
     parser.add_argument("--dialect", choices=VALID_DIALECTS)
     parser.add_argument("--base-url")
     parser.add_argument("--api-key-env")
@@ -475,11 +560,28 @@ def add_subparser(subparsers: argparse._SubParsersAction) -> argparse.ArgumentPa
     parser.add_argument("--recordings", help="Path to recordings.jsonl (required with --fixture).")
     parser.add_argument("--dataset", help="Optional dataset.jsonl to filter fixture grid IDs.")
     parser.add_argument("--pass-index", type=int, default=0, help="Recording pass index for --fixture (default 0).")
-    parser.set_defaults(handler=run)
+    parser.set_defaults(handler=run, _parser=parser)
     return parser
 
 
 def run(args: argparse.Namespace) -> int:
+    if args.base_config is None:
+        missing = [
+            flag
+            for flag, value in (
+                ("--name", args.name),
+                ("--provider", args.provider),
+                ("--model-id", args.model_id),
+            )
+            if value is None
+        ]
+        if missing:
+            parser = getattr(args, "_parser", None)
+            msg = f"the following arguments are required unless --base-config is given: {', '.join(missing)}"
+            if parser is not None:
+                parser.error(msg)
+            raise ValueError(msg)
+
     extra_headers = _parse_extra_headers(args.extra_header)
     ep_fields = {
         "dialect": args.dialect,
@@ -498,16 +600,15 @@ def run(args: argparse.Namespace) -> int:
         "min_patch_tokens": args.min_patch_tokens,
         "extra_headers": extra_headers,
     }
-    has_endpoint = args.provider == "custom" or any(
-        v is not None and v != {} for v in ep_fields.values()
-    )
-    endpoint = EndpointConfig(**ep_fields) if has_endpoint else None
+    has_cli_endpoint = any(v is not None and v != {} for v in ep_fields.values())
+    endpoint = EndpointConfig(**ep_fields) if has_cli_endpoint else None
 
     info = export_model(
         service=args.service,
         name=args.name,
         provider=args.provider,
         model_id=args.model_id,
+        base_config_path=args.base_config,
         output_toml=args.output,
         sweep_path=args.sweep,
         fit_path=args.fit,

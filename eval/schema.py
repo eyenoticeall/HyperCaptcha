@@ -324,7 +324,7 @@ def parse_prompt(prompt: str, service: str = "recaptcha") -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# TOML / Plan dataclasses matching rust-core schema contract exactly
+# TOML / Plan dataclasses matching the Rust `ModelConfig` schema contract exactly
 # ---------------------------------------------------------------------------
 
 
@@ -1005,7 +1005,7 @@ def make_group_folds(
     n_folds: int = 5,
     seed: int = 7,
 ) -> tuple[np.ndarray, np.ndarray, int, int]:
-    """Deterministic grouped K-fold assignment matching `lib.py:load`."""
+    """Deterministic grouped K-fold assignment stratified by group ID."""
     if isinstance(n_folds, bool) or n_folds < 2:
         raise ValueError(f"n_folds must be >= 2, got {n_folds}")
     groups = sorted(set(str(g) for g in group_ids))

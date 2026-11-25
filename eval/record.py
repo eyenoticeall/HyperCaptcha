@@ -13,6 +13,7 @@ import concurrent.futures as cf
 import json
 import shutil
 import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -224,6 +225,7 @@ def record_dataset(
     cold_connections: bool = False,
     extra_args: Sequence[str] = (),
     limit: int | None = None,
+    progress: bool = True,
 ) -> dict[str, Any]:
     """Send every grid in `dataset_path` across `passes` and append resumable records."""
     if passes < 1:
@@ -271,10 +273,11 @@ def record_dataset(
             if (str(item["id"]), p_idx) not in done:
                 jobs.append((p_idx, item))
 
-    skipped_existing = len(items) * passes - len(jobs)
+    total_jobs = len(items) * passes
+    skipped_existing = total_jobs - len(jobs)
     if not jobs:
         return {
-            "total_jobs": len(items) * passes,
+            "total_jobs": total_jobs,
             "skipped_existing": skipped_existing,
             "skipped_service": skipped_service,
             "recorded": 0,
@@ -283,6 +286,7 @@ def record_dataset(
 
     lock = threading.Lock()
     recorded = 0
+    completed = skipped_existing
     failed: list[dict[str, Any]] = []
 
     with _managed_server(
@@ -305,7 +309,7 @@ def record_dataset(
         ) as out_handle:
 
             def _run_one(job: tuple[int, dict[str, Any]]) -> None:
-                nonlocal recorded
+                nonlocal recorded, completed
                 pass_index, item = job
                 gid = str(item["id"])
                 item_layout = int(item["layout"])
@@ -357,6 +361,14 @@ def record_dataset(
                 else:
                     with lock:
                         failed.append({"grid_id": gid, "pass_index": pass_index, "error": last_error[:240]})
+                        completed += 1
+                        if progress:
+                            print(
+                                f"[{completed}/{total_jobs}] pass={pass_index} grid={gid} "
+                                f"FAILED: {last_error[:120]} [recorded={recorded} failed={len(failed)}]",
+                                file=sys.stderr,
+                                flush=True,
+                            )
                     return
 
                 assert result is not None
@@ -372,13 +384,21 @@ def record_dataset(
                     out_handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
                     out_handle.flush()
                     recorded += 1
+                    completed += 1
+                    if progress:
+                        print(
+                            f"[{completed}/{total_jobs}] pass={pass_index} grid={gid} "
+                            f"ok ({wall_ms}ms) [recorded={recorded} failed={len(failed)}]",
+                            file=sys.stderr,
+                            flush=True,
+                        )
 
             with cf.ThreadPoolExecutor(max_workers=workers) as pool:
                 for _ in pool.map(_run_one, jobs):
                     pass
 
     return {
-        "total_jobs": len(items) * passes,
+        "total_jobs": total_jobs,
         "skipped_existing": skipped_existing,
         "skipped_service": skipped_service,
         "recorded": recorded,
@@ -400,7 +420,13 @@ def add_subparser(subparsers: argparse._SubParsersAction) -> argparse.ArgumentPa
     parser.add_argument("--limit", type=int, help="Record at most this many grids.")
     parser.add_argument("--server-url", help="Use an already-running loopback lab server URL instead of spawning one.")
     parser.add_argument("--binary", help="Path to the hypercaptcha binary.")
-    parser.add_argument("--captcha", choices=("recaptcha", "hcaptcha"), help="CAPTCHA service for spawned server.")
+    parser.add_argument(
+        "--service",
+        "--captcha",
+        dest="service",
+        choices=("recaptcha", "hcaptcha"),
+        help="CAPTCHA service to filter and pass to a spawned server.",
+    )
     parser.add_argument("--model", help="Model name or ID passed to `hypercaptcha serve --model`.")
     parser.add_argument("--provider", help="Provider passed to `hypercaptcha serve --provider`.")
     parser.add_argument("--model-config", help="TOML config path passed to `hypercaptcha serve --model-config`.")
@@ -423,7 +449,7 @@ def run(args: argparse.Namespace) -> int:
         retries=args.retries,
         server_url=args.server_url,
         binary=args.binary,
-        service=args.captcha,
+        service=args.service,
         layout=args.layout,
         model=args.model,
         provider=args.provider,

@@ -16,9 +16,6 @@ dependencies = [
 
 [project.optional-dependencies]
 browser = [
-    "playwright==1.62.0",
-]
-camoufox = [
     "camoufox==0.5.9",
 ]
 dev = [

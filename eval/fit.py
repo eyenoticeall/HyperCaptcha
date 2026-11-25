@@ -1,8 +1,4 @@
-"""Standardized ridge logistic regression and grouped K-fold CV for 3x3 and 4x4 grids.
-
-Matches the proven optimization and grouped cross-validation methodology from
-`reports/labels/next/boxgrid/liquid/lib.py` and `reports/labels/opt/fit4.py`.
-"""
+"""Standardized ridge logistic regression and grouped K-fold CV for 3x3 and 4x4 grids."""
 
 from __future__ import annotations
 

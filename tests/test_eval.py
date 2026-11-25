@@ -1980,3 +1980,755 @@ def test_folds_and_boot_validation_in_schema_fit_and_sweep(tmp_path: Path) -> No
                 ]
             )
         assert exc_boot.value.code == 2
+
+
+# ---------------------------------------------------------------------------
+# 8. DX streamlining: --base-config, --service/--captcha aliases, record progress,
+#    pyproject extras, and Camoufox-only runner scripts
+# ---------------------------------------------------------------------------
+
+
+def test_export_base_config_inheritance_overrides_and_errors(tmp_path: Path) -> None:
+    """Verify `export --base-config` inherits metadata + [endpoint], allows CLI overrides, and errors cleanly."""
+    ds_path, lbl_path, rec_path = _build_synthetic_pipeline_files(tmp_path)
+    fit_path = tmp_path / "fit.json"
+    sweep_path = tmp_path / "sweep.json"
+    assert cli_main(["fit", "--dataset", str(ds_path), "--labels", str(lbl_path), "--recordings", str(rec_path), "-o", str(fit_path)]) == 0
+    assert (
+        cli_main(
+            [
+                "sweep",
+                "--dataset",
+                str(ds_path),
+                "--labels",
+                str(lbl_path),
+                "--recordings",
+                str(rec_path),
+                "--fit",
+                str(fit_path),
+                "--fast",
+                "--boot",
+                "50",
+                "-o",
+                str(sweep_path),
+            ]
+        )
+        == 0
+    )
+
+    # 1. Pure inheritance from the shipped custom example TOML (no --name/--provider/--model-id/--service needed).
+    starter = REPO_ROOT / "models" / "examples" / "custom-decision-model.toml"
+    out_inherited = tmp_path / "inherited.toml"
+    assert (
+        cli_main(
+            [
+                "export",
+                "--base-config",
+                str(starter),
+                "--fit",
+                str(fit_path),
+                "--sweep",
+                str(sweep_path),
+                "-o",
+                str(out_inherited),
+            ]
+        )
+        == 0
+    )
+    inherited = load_model_config(out_inherited)
+    assert inherited.service == "recaptcha"
+    assert inherited.name == "MyProvider/my-decision-model"
+    assert inherited.provider == "custom"
+    assert inherited.model_id == "my-decision-model-v1"
+    assert inherited.endpoint is not None
+    assert inherited.endpoint.dialect == "systemone-assets"
+    assert inherited.endpoint.base_url == "https://api.example.com/v1"
+    assert inherited.endpoint.api_key_env == "MY_DECISION_API_KEY"
+    assert inherited.endpoint.max_images == 16
+    assert inherited.endpoint.gzip is False
+    # Freshly exported tuning replaces starter's average-only tuning.
+    assert inherited.tuning is not None
+    assert inherited.tuning.default_decision == "logistic"
+    assert inherited.tuning.logistic_3x3 is not None
+    assert inherited.tuning.logistic_4x4 is not None
+    assert inherited.tuning.efforts is not None
+
+    # 2. Custom hCaptcha base config with extra_headers: verify service inheritance + selective CLI overrides.
+    hc_base = tmp_path / "hc_starter.toml"
+    hc_base.write_text(
+        """schema_version = 1
+service = "hcaptcha"
+name = "Base/hc-model"
+provider = "custom"
+model_id = "base-hc-v1"
+
+[endpoint]
+dialect = "systemone-assets"
+base_url = "https://base.example.com/v1"
+api_key_env = "BASE_KEY"
+gzip = false
+max_images = 12
+
+[endpoint.extra_headers]
+"X-Keep" = "keep-me"
+"X-Override" = "old-val"
+""",
+        encoding="utf-8",
+    )
+    out_hc_inherited = tmp_path / "hc_inherited.toml"
+    assert cli_main(["export", "--base-config", str(hc_base), "--fit", str(fit_path), "-o", str(out_hc_inherited)]) == 0
+    hc_cfg = load_model_config(out_hc_inherited)
+    assert hc_cfg.service == "hcaptcha"
+    assert hc_cfg.endpoint is not None
+    assert hc_cfg.endpoint.extra_headers == {"X-Keep": "keep-me", "X-Override": "old-val"}
+
+    out_overridden = tmp_path / "hc_overridden.toml"
+    assert (
+        cli_main(
+            [
+                "export",
+                "--base-config",
+                str(hc_base),
+                "--captcha",
+                "recaptcha",
+                "--name",
+                "Override/rc-model",
+                "--model-id",
+                "override-rc-v2",
+                "--base-url",
+                "https://override.example.com/v2",
+                "--gzip",
+                "--max-images",
+                "16",
+                "--extra-header",
+                "X-Override=new-val",
+                "--extra-header",
+                "X-Added=added-val",
+                "--fit",
+                str(fit_path),
+                "--sweep",
+                str(sweep_path),
+                "-o",
+                str(out_overridden),
+            ]
+        )
+        == 0
+    )
+    ov_cfg = load_model_config(out_overridden)
+    assert ov_cfg.service == "recaptcha"
+    assert ov_cfg.name == "Override/rc-model"
+    assert ov_cfg.provider == "custom"  # inherited
+    assert ov_cfg.model_id == "override-rc-v2"
+    assert ov_cfg.endpoint is not None
+    assert ov_cfg.endpoint.dialect == "systemone-assets"  # inherited
+    assert ov_cfg.endpoint.api_key_env == "BASE_KEY"  # inherited
+    assert ov_cfg.endpoint.base_url == "https://override.example.com/v2"
+    assert ov_cfg.endpoint.gzip is True
+    assert ov_cfg.endpoint.max_images == 16
+    assert ov_cfg.endpoint.extra_headers == {
+        "X-Keep": "keep-me",
+        "X-Override": "new-val",
+        "X-Added": "added-val",
+    }
+
+    # 3. Error handling: missing required flags without --base-config exits with code 2 (CLI) / ValueError (API).
+    with pytest.raises(SystemExit) as exc_missing:
+        cli_main(["export", "-o", str(tmp_path / "missing.toml")])
+    assert exc_missing.value.code == 2
+
+    with pytest.raises(ValueError, match="--name.*--provider.*--model-id"):
+        export_model(output_toml=tmp_path / "missing_api.toml")
+
+    # 4. Nonexistent or invalid --base-config fails clearly.
+    with pytest.raises(FileNotFoundError):
+        export_model(base_config_path=tmp_path / "nope.toml", output_toml=tmp_path / "out.toml")
+
+    bad_base = tmp_path / "bad_base.toml"
+    bad_base.write_text('schema_version = 99\nservice = "recaptcha"\nname = "x"\nprovider = "vllm"\nmodel_id = "y"\n', encoding="utf-8")
+    with pytest.raises(ValueError, match="schema_version"):
+        export_model(base_config_path=bad_base, output_toml=tmp_path / "out.toml")
+
+
+def test_service_and_captcha_aliases_and_record_stderr_progress(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Verify `--service`/`--captcha` work on dataset/record/export and `record` logs progress to stderr only."""
+    run_rc = tmp_path / "rc"
+    run_hc = tmp_path / "hc"
+    (run_rc / "t1").mkdir(parents=True)
+    (run_hc / "h1").mkdir(parents=True)
+    (run_rc / "t1" / "round-01.png").write_bytes(TINY_PNG + b"rc-alias")
+    (run_hc / "h1" / "grid-01.png").write_bytes(TINY_PNG + b"hc-alias")
+    (run_rc / "trials.jsonl").write_text(
+        json.dumps({"trial_id": "t1", "rounds": [{"prompt": "Select all squares with\nbuses", "layout": 4, "image": "round-01.png"}]}) + "\n",
+        encoding="utf-8",
+    )
+    (run_hc / "trials.jsonl").write_text(
+        json.dumps({"trial_id": "h1", "captcha": "hcaptcha", "rounds": [{"prompt": "Pick the tiger", "layout": 3, "image": "grid-01.png"}]}) + "\n",
+        encoding="utf-8",
+    )
+
+    # 1. `dataset`: both --service and --captcha filter identically.
+    ds_svc = tmp_path / "ds_svc.jsonl"
+    ds_cap = tmp_path / "ds_cap.jsonl"
+    assert cli_main(["dataset", str(run_rc), str(run_hc), "--service", "hcaptcha", "-o", str(ds_svc)]) == 0
+    assert cli_main(["dataset", str(run_rc), str(run_hc), "--captcha", "hcaptcha", "-o", str(ds_cap)]) == 0
+    rows_svc = [json.loads(line) for line in ds_svc.read_text(encoding="utf-8").splitlines()]
+    rows_cap = [json.loads(line) for line in ds_cap.read_text(encoding="utf-8").splitlines()]
+    assert len(rows_svc) == 1 and rows_svc[0]["service"] == "hcaptcha"
+    assert rows_svc == rows_cap
+
+    # 2. `export`: --captcha alias sets service in TOML.
+    ex_toml = tmp_path / "ex_hc.toml"
+    assert (
+        cli_main(
+            [
+                "export",
+                "--captcha",
+                "hcaptcha",
+                "--name",
+                "vLLM/hc-alias",
+                "--provider",
+                "vllm",
+                "--model-id",
+                "vllm-sr/d3-ultra",
+                "-o",
+                str(ex_toml),
+            ]
+        )
+        == 0
+    )
+    assert load_model_config(ex_toml).service == "hcaptcha"
+    capsys.readouterr()  # clear previous stdout/stderr
+
+    # 3. `record`: --service alias works AND progress is written to stderr without polluting stdout or JSONL.
+    ds_all = tmp_path / "ds_all.jsonl"
+    assert cli_main(["dataset", str(run_rc), str(run_hc), "-o", str(ds_all)]) == 0
+    capsys.readouterr()
+
+    class MockProgressLab(BaseHTTPRequestHandler):
+        def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
+            return
+
+        def do_POST(self) -> None:  # noqa: N802
+            length = int(self.headers.get("Content-Length", "0"))
+            _ = self.rfile.read(length)
+            probs = {str(i): 0.5 for i in range(1, 17)}
+            body = json.dumps(
+                {
+                    "result": {
+                        "status": "answered",
+                        "prediction": {"type": "tiles", "value": [1]},
+                        "vllm_components": {
+                            "whole_grid": {"tile_probabilities": probs},
+                            "variant": {"tile_probabilities": probs, "passes": [{"grid_pixels": [389, 389], "tile_probabilities": probs}]},
+                        },
+                    }
+                }
+            ).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), MockProgressLab)
+    port = server.server_address[1]
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        rec_out = tmp_path / "rec_progress.jsonl"
+        rc = cli_main(
+            [
+                "record",
+                "--dataset",
+                str(ds_all),
+                "-o",
+                str(rec_out),
+                "--service",
+                "recaptcha",
+                "--passes",
+                "2",
+                "--workers",
+                "1",
+                "--server-url",
+                f"http://127.0.0.1:{port}",
+            ]
+        )
+        assert rc == 0
+        captured = capsys.readouterr()
+        assert "[1/2] pass=0" in captured.err
+        assert "[2/2] pass=1" in captured.err
+        assert "[1/2]" not in captured.out
+        assert "Recorded 2 new rounds" in captured.out
+        assert "1 other-service skipped" in captured.out
+        # JSONL must contain strictly valid JSON entries (zero progress lines).
+        jsonl_rows = [json.loads(line) for line in rec_out.read_text(encoding="utf-8").splitlines()]
+        assert len(jsonl_rows) == 2
+        assert {r["pass_index"] for r in jsonl_rows} == {0, 1}
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_pyproject_extras_and_deleted_legacy_scripts() -> None:
+    """Verify `pyproject.toml` consolidates browser/camoufox into a single `browser` extra and legacy scripts are gone."""
+    data = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    extras = data["project"]["optional-dependencies"]
+    assert extras["browser"] == ["camoufox==0.5.9"]
+    assert extras["dev"] == ["pytest>=8.0"]
+    assert "camoufox" not in extras
+
+    assert not (REPO_ROOT / "scripts" / "chrome_lab.py").exists()
+    assert not (REPO_ROOT / "scripts" / "camoufox_lab.py").exists()
+    for name in ("_common.py", "recaptcha_lab.py", "hcaptcha_lab.py"):
+        src = (REPO_ROOT / "scripts" / name).read_text(encoding="utf-8")
+        assert "playwright.chromium" not in src
+        assert "sync_playwright" not in src
+
+
+def test_scripts_common_helpers_and_mode_runners(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """Verify `scripts/_common.py` URL validation, parsers, model helpers, and interactive/smoke/vision-check helpers."""
+    import argparse
+
+    from scripts import _common
+
+    # URL validation: localhost, *.localhost, IPv4/IPv6 loopback, and loopback-resolving /etc/hosts names.
+    assert _common.validate_lab_url("http://localhost:8765") == "http://localhost:8765"
+    assert _common.validate_lab_url("http://localhost:8765/") == "http://localhost:8765"
+    assert _common.validate_lab_url("http://hypercaptcha.localhost:8765") == "http://hypercaptcha.localhost:8765"
+    assert _common.validate_lab_url("http://127.0.0.1:8765") == "http://127.0.0.1:8765"
+    assert _common.validate_lab_url("http://[::1]:8765") == "http://[::1]:8765"
+
+    fake_loopback_resolver = lambda host, port: [(2, 1, 6, "", ("127.0.0.1", 0))]  # noqa: E731
+    fake_mixed_resolver = lambda host, port: [  # noqa: E731
+        (2, 1, 6, "", ("127.0.0.1", 0)),
+        (2, 1, 6, "", ("93.184.216.34", 0)),
+    ]
+    assert _common.validate_lab_url("http://lab.test:8765", resolver=fake_loopback_resolver) == "http://lab.test:8765"
+    assert _common.validate_lab_url("http://lab.test:8765", resolver=fake_mixed_resolver) is None
+
+    for bad_url in (
+        "https://localhost:8765",
+        "http://example.com:8765",
+        "http://user:pass@localhost:8765",
+        "http://localhost:8765/path",
+        "http://localhost:8765/?q=1",
+        "http://localhost:8765/#frag",
+        "http://localhost:99999",
+    ):
+        assert _common.validate_lab_url(bad_url, resolver=lambda h, p: [(2, 1, 6, "", ("93.184.216.34", 0))]) is None
+
+    # Numeric argument parsers.
+    assert _common.positive_int("1") == 1
+    assert _common.positive_int("50") == 50
+    for bad in ("0", "-3", "abc"):
+        with pytest.raises(argparse.ArgumentTypeError):
+            _common.positive_int(bad)
+    assert _common.non_negative_int("0") == 0
+    assert _common.non_negative_int("10") == 10
+    for bad in ("-1", "xyz"):
+        with pytest.raises(argparse.ArgumentTypeError):
+            _common.non_negative_int(bad)
+    assert _common.positive_float("2.0") == 2.0
+    for bad in ("0", "-1.5", "nan", "inf"):
+        with pytest.raises(argparse.ArgumentTypeError):
+            _common.positive_float(bad)
+
+    # Captcha config validation with cross-script hints.
+    assert _common.validate_captcha_config({"captcha": "recaptcha"}, "recaptcha") is None
+    assert _common.validate_captcha_config({"captcha": "hcaptcha"}, "hcaptcha") is None
+    hint_hc = _common.validate_captcha_config({"captcha": "hcaptcha"}, "recaptcha")
+    assert hint_hc is not None and "scripts/hcaptcha_lab.py" in hint_hc
+    hint_rc = _common.validate_captcha_config({"captcha": "recaptcha"}, "hcaptcha")
+    assert hint_rc is not None and "scripts/recaptcha_lab.py" in hint_rc
+
+    # Model name resolution and reply error helpers.
+    assert _common.resolve_model_name({"model_name": "vLLM/d3-ultra"}, {}) == "vLLM/d3-ultra"
+    assert _common.resolve_model_name({}, {"rounds": [{"model": {"model_name": "Liquid/d1.2"}}]}) == "Liquid/d1.2"
+    assert _common.resolve_model_name({"provider": "vllm", "model": "d3"}, {}) == "vllm/d3"
+    assert _common.resolve_model_name({}, {}) is None
+
+    assert not _common.model_reply_failed({"result": {"status": "answered"}})
+    assert _common.model_reply_failed({"result": {"status": "api_error"}})
+    assert _common.model_reply_failed("not-a-dict")
+    assert _common.format_model_http_error((400, "bad payload"), "ignored") == "Model request failed (HTTP 400): bad payload"
+    assert _common.format_model_http_error((400, None), "status msg") == "Model request failed (HTTP 400): status msg"
+    assert _common.format_model_http_error(None, "timeout") == "Model request failed: timeout"
+
+    # Fake Playwright browser/context/page to verify run_vision_check, run_interactive, and run_smoke offline.
+    class FakeResp:
+        def __init__(self, status: int, payload: Any) -> None:
+            self.status = status
+            self.ok = 200 <= status < 300
+            self._payload = payload
+
+        def json(self) -> Any:
+            return self._payload
+
+    class FakeLocator:
+        def __init__(self, text: str = "") -> None:
+            self._text = text
+            self.waited = False
+
+        def wait_for(self, **_kwargs: Any) -> None:
+            self.waited = True
+
+        def inner_text(self) -> str:
+            return self._text
+
+    class FakeRequest:
+        def __init__(self) -> None:
+            self.posts: list[tuple[str, dict[str, Any]]] = []
+
+        def post(self, url: str, headers: dict[str, str], data: dict[str, Any], timeout: int) -> FakeResp:
+            self.posts.append((url, data))
+            return FakeResp(200, {"result": {"passed": True}})
+
+    class FakePage:
+        def __init__(self, result_text: str = '{"result": {"valid": true}}') -> None:
+            self.url = ""
+            self.request = FakeRequest()
+            self.headings_waited: list[str] = []
+            self.closed_waited = False
+            self._result_text = result_text
+
+        def goto(self, url: str, **_kwargs: Any) -> FakeResp:
+            self.url = url
+            return FakeResp(200, {})
+
+        def get_by_role(self, role: str, name: str) -> FakeLocator:
+            self.headings_waited.append(f"{role}:{name}")
+            return FakeLocator()
+
+        def locator(self, selector: str) -> FakeLocator:
+            return FakeLocator(self._result_text)
+
+        def wait_for_event(self, event: str, timeout: int = 0) -> None:
+            assert event == "close" and timeout == 0
+            self.closed_waited = True
+
+    class FakeContext:
+        def __init__(self, page: FakePage) -> None:
+            self._page = page
+
+        def __enter__(self) -> FakeContext:
+            return self
+
+        def __exit__(self, *args: Any) -> None:
+            return None
+
+        def new_page(self) -> FakePage:
+            return self._page
+
+    class FakeBrowser:
+        version = "135.0-fake"
+
+        def __init__(self, page: FakePage) -> None:
+            self._page = page
+
+        def new_context(self, **_kwargs: Any) -> FakeContext:
+            return FakeContext(self._page)
+
+    # Vision check writes vision-checks.jsonl with source="camoufox".
+    vc_page = FakePage()
+    vc_dir = tmp_path / "vc_out"
+    vc_id, check = _common.run_vision_check(FakeBrowser(vc_page), "http://localhost:8765", vc_dir)
+    assert vc_id and check["result"]["passed"] is True
+    assert vc_page.request.posts[0][1]["source"] == "camoufox"
+    assert (vc_dir / "vision-checks.jsonl").is_file()
+
+    # Interactive runner opens #source=camoufox, waits for heading and close event.
+    int_page = FakePage()
+    _common.run_interactive(FakeBrowser(int_page), "http://localhost:8765", heading="Google widget")
+    assert int_page.url == "http://localhost:8765/#source=camoufox"
+    assert int_page.headings_waited == ["heading:Google widget"]
+    assert int_page.closed_waited is True
+
+    # Smoke runner clicks checkbox callback and returns parsed JSON record.
+    clicked = {"yes": False}
+    smoke_page = FakePage('{"result": {"valid": true}}')
+    rec = _common.run_smoke(
+        FakeBrowser(smoke_page),
+        "http://hypercaptcha.localhost:8765",
+        heading="hCaptcha widget",
+        click_checkbox=lambda p: clicked.__setitem__("yes", True),
+        result_selector="#verdict",
+    )
+    assert clicked["yes"] is True
+    assert smoke_page.url == "http://hypercaptcha.localhost:8765/#source=camoufox"
+    assert rec == {"result": {"valid": True}}
+    capsys.readouterr()
+
+
+def test_recaptcha_and_hcaptcha_cli_parsing_validation_and_score_errors(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Verify CLI defaults, lifted trial cap, flag conflict rejection, config checks, and score error handling."""
+    import base64
+
+    from scripts import hcaptcha_lab, recaptcha_lab
+
+    # --- recaptcha_lab.py ---
+    assert recaptcha_lab.BROWSER == "camoufox"
+    assert recaptcha_lab.SOURCE == "camoufox"
+
+    _, rc_default, rc_url = recaptcha_lab.parse_args([])
+    assert rc_url == "http://localhost:8765"
+    assert rc_default.output == Path("reports/recaptcha")
+    assert rc_default.trials == 1
+    assert rc_default.max_rounds == 6
+    assert rc_default.max_stages == 0
+    assert rc_default.fast is True
+    assert rc_default.early_tiles is True
+    assert rc_default.headed is False
+    assert rc_default.submit is False
+
+    # Lifted --trials cap (> 20 works), custom loopback URL, --headed, --no-early-tiles, --no-fast.
+    _, rc_many, rc_custom_url = recaptcha_lab.parse_args(
+        [
+            "--url",
+            "http://127.0.0.1:9000/",
+            "--trials",
+            "50",
+            "--max-rounds",
+            "30",
+            "--max-stages",
+            "5",
+            "--submit",
+            "--no-early-tiles",
+            "--no-fast",
+            "--headed",
+            "--output",
+            "reports/custom_rc",
+        ]
+    )
+    assert rc_custom_url == "http://127.0.0.1:9000"
+    assert rc_many.trials == 50
+    assert rc_many.max_rounds == 30
+    assert rc_many.max_stages == 5
+    assert rc_many.submit is True
+    assert rc_many.early_tiles is False
+    assert rc_many.fast is False
+    assert rc_many.headed is True
+    assert rc_many.output == Path("reports/custom_rc")
+
+    # --browser flag is removed; special modes are mutually exclusive; invalid combinations rejected.
+    bad_rc_invocations = [
+        ["--browser", "chrome"],
+        ["--url", "https://example.com"],
+        ["--trials", "0"],
+        ["--max-rounds", "0"],
+        ["--max-stages", "-1"],
+        ["--interactive", "--smoke"],
+        ["--smoke", "--score"],
+        ["--interactive", "--score"],
+        ["--interactive", "--submit"],
+        ["--smoke", "--submit"],
+        ["--score", "--submit"],
+        ["--smoke", "--no-early-tiles"],
+        ["--score", "--fast"],
+        ["--interactive", "--no-fast"],
+        ["--smoke", "--trials", "2"],
+        ["--score", "--output", "reports/x"],
+    ]
+    for argv in bad_rc_invocations:
+        with pytest.raises(SystemExit) as exc:
+            recaptcha_lab.parse_args(argv)
+        assert exc.value.code == 2, f"expected exit code 2 for recaptcha_lab {argv}"
+
+    # Valid special modes with --headed.
+    for mode_flag in ("--interactive", "--smoke", "--score"):
+        _, parsed, _ = recaptcha_lab.parse_args([mode_flag, "--headed"])
+        assert parsed.headed is True
+
+    # Config validation on recaptcha_lab.
+    err_wrong = recaptcha_lab.validate_settings(rc_default, {"captcha": "hcaptcha", "mode": "checkbox"})
+    assert err_wrong is not None and "scripts/hcaptcha_lab.py" in err_wrong
+
+    _, rc_smoke_args, _ = recaptcha_lab.parse_args(["--smoke"])
+    assert recaptcha_lab.validate_settings(rc_smoke_args, {"captcha": "recaptcha", "mode": "v2", "test": True, "score_based": False}) is None
+    assert recaptcha_lab.validate_settings(rc_smoke_args, {"captcha": "recaptcha", "mode": "v2", "test": False, "score_based": False}) is not None
+
+    _, rc_score_args, _ = recaptcha_lab.parse_args(["--score"])
+    assert recaptcha_lab.validate_settings(rc_score_args, {"captcha": "recaptcha", "mode": "v3", "score_based": True}) is None
+    assert recaptcha_lab.validate_settings(rc_score_args, {"captcha": "recaptcha", "mode": "v2", "score_based": False}) is not None
+
+    _, rc_int_args, _ = recaptcha_lab.parse_args(["--interactive"])
+    assert recaptcha_lab.validate_settings(rc_int_args, {"captcha": "recaptcha", "mode": "v3", "score_based": True}) is None
+
+    assert recaptcha_lab.validate_settings(rc_default, {"captcha": "recaptcha", "mode": "v2", "test": True}) is not None
+    assert recaptcha_lab.validate_settings(rc_default, {"captcha": "recaptcha", "mode": "v2", "test": False}) is None
+    assert recaptcha_lab.validate_settings(rc_many, {"captcha": "recaptcha", "mode": "v2", "test": False, "supports_vision": False}) is not None
+    assert recaptcha_lab.validate_settings(rc_many, {"captcha": "recaptcha", "mode": "v2", "test": False, "supports_vision": True}) is None
+
+    # evaluate_early_answer edge cases.
+    b64_png = base64.b64encode(TINY_PNG).decode("ascii")
+    drawn, problem = recaptcha_lab.evaluate_early_answer(
+        {
+            "grid_png": b64_png,
+            "tile_threshold": 0.5,
+            "result": {"status": "answered", "prediction": {"type": "tiles", "value": [1]}, "tile_probabilities": {"1": 0.9}},
+        }
+    )
+    assert drawn == TINY_PNG and problem is None
+    _, close_problem = recaptcha_lab.evaluate_early_answer(
+        {
+            "grid_png": b64_png,
+            "tile_threshold": 0.5,
+            "result": {"status": "answered", "prediction": {"type": "tiles", "value": [1]}, "tile_probabilities": {"1": 0.55}},
+        }
+    )
+    assert close_problem == "a score close to the cutoff"
+
+    # run_score fast HTTP 400 error handling (offline fake page).
+    class ScoreResp:
+        def __init__(self, url: str, status: int, payload: Any) -> None:
+            self.url = url
+            self.status = status
+            self.ok = 200 <= status < 300
+            self._payload = payload
+
+        def json(self) -> Any:
+            return self._payload
+
+    class ScoreLocator:
+        def __init__(self, text: str = "") -> None:
+            self._text = text
+
+        def wait_for(self, **_kwargs: Any) -> None:
+            return None
+
+        def click(self, **_kwargs: Any) -> None:
+            return None
+
+        def inner_text(self) -> str:
+            return self._text
+
+    class ScoreWaitHandle:
+        def __init__(self, val: dict[str, Any]) -> None:
+            self._val = val
+
+        def json_value(self) -> dict[str, Any]:
+            return self._val
+
+    class ScorePage:
+        def __init__(self, wait_outcome: dict[str, Any], http_err_resp: ScoreResp | None = None) -> None:
+            self._listeners: list[Any] = []
+            self._wait_outcome = wait_outcome
+            self._http_err_resp = http_err_resp
+
+        def on(self, event: str, fn: Any) -> None:
+            if event == "response":
+                self._listeners.append(fn)
+
+        def goto(self, url: str, **_kwargs: Any) -> ScoreResp:
+            return ScoreResp(url, 200, {})
+
+        def get_by_role(self, role: str, name: str) -> ScoreLocator:
+            return ScoreLocator()
+
+        def locator(self, selector: str) -> ScoreLocator:
+            return ScoreLocator('{"result": {"valid": true, "score": 0.9}}')
+
+        def wait_for_function(self, js: str, **_kwargs: Any) -> ScoreWaitHandle:
+            if self._http_err_resp is not None:
+                for fn in self._listeners:
+                    fn(self._http_err_resp)
+            return ScoreWaitHandle(self._wait_outcome)
+
+    class ScoreBrowser:
+        version = "135.0-fake"
+
+        def __init__(self, page: ScorePage) -> None:
+            self._page = page
+
+        def new_context(self, **_kwargs: Any) -> Any:
+            page = self._page
+
+            class Ctx:
+                def __enter__(self) -> Ctx:
+                    return self
+
+                def __exit__(self, *args: Any) -> None:
+                    return None
+
+                def new_page(self) -> ScorePage:
+                    return page
+
+            return Ctx()
+
+    capsys.readouterr()
+    err_page = ScorePage(
+        {"kind": "error", "text": "Bad request"},
+        ScoreResp("http://localhost:8765/model", 400, {"error": "provider rejected score trace"}),
+    )
+    with pytest.raises(SystemExit) as exc_400:
+        recaptcha_lab.run_score(ScoreBrowser(err_page), "http://localhost:8765", {"provider": "openai-completions"})
+    assert exc_400.value.code == 1
+    assert "HTTP 400" in capsys.readouterr().err
+
+    non_ans_page = ScorePage({"kind": "result", "text": '{"result": {"status": "refused"}}'})
+    with pytest.raises(SystemExit) as exc_refused:
+        recaptcha_lab.run_score(ScoreBrowser(non_ans_page), "http://localhost:8765", {"provider": "openai-completions"})
+    assert exc_refused.value.code == 1
+
+    # --- hcaptcha_lab.py ---
+    assert hcaptcha_lab.BROWSER == "camoufox"
+    assert hcaptcha_lab.SOURCE == "camoufox"
+
+    _, hc_default, hc_url = hcaptcha_lab.parse_args([])
+    assert hc_url == "http://hypercaptcha.localhost:8765"
+    assert hc_default.output == Path("reports/hcaptcha")
+    assert hc_default.trials == 1
+    assert hc_default.max_rounds == 24
+    assert hc_default.max_stages == 1
+    assert hc_default.max_refreshes == 12
+    assert hc_default.fast is True
+    assert hc_default.headed is False
+    assert hc_default.submit is False
+
+    _, hc_custom, hc_custom_url = hcaptcha_lab.parse_args(
+        ["--url", "http://[::1]:8765", "--trials", "5", "--submit", "--headed", "--max-refreshes", "4"]
+    )
+    assert hc_custom_url == "http://[::1]:8765"
+    assert hc_custom.trials == 5
+    assert hc_custom.submit is True
+    assert hc_custom.headed is True
+    assert hc_custom.max_refreshes == 4
+
+    bad_hc_invocations = [
+        ["--url", "https://example.com"],
+        ["--trials", "0"],
+        ["--max-stages", "0"],
+        ["--max-refreshes", "0"],
+        ["--interactive", "--smoke"],
+        ["--interactive", "--submit"],
+        ["--smoke", "--submit"],
+        ["--smoke", "--trials", "2"],
+        ["--interactive", "--max-refreshes", "3"],
+        ["--smoke", "--no-fast"],
+        ["--interactive", "--output", "reports/x"],
+    ]
+    for argv in bad_hc_invocations:
+        with pytest.raises(SystemExit) as exc:
+            hcaptcha_lab.parse_args(argv)
+        assert exc.value.code == 2, f"expected exit code 2 for hcaptcha_lab {argv}"
+
+    # Config validation on hcaptcha_lab.
+    err_wrong_hc = hcaptcha_lab.validate_settings(hc_default, {"captcha": "recaptcha", "mode": "v2"})
+    assert err_wrong_hc is not None and "scripts/recaptcha_lab.py" in err_wrong_hc
+
+    _, hc_smoke_args, _ = hcaptcha_lab.parse_args(["--smoke"])
+    assert hcaptcha_lab.validate_settings(hc_smoke_args, {"captcha": "hcaptcha", "test": True}) is None
+    assert hcaptcha_lab.validate_settings(hc_smoke_args, {"captcha": "hcaptcha", "test": False}) is not None
+
+    _, hc_int_args, _ = hcaptcha_lab.parse_args(["--interactive"])
+    assert hcaptcha_lab.validate_settings(hc_int_args, {"captcha": "hcaptcha", "test": True}) is None
+
+    assert hcaptcha_lab.validate_settings(hc_default, {"captcha": "hcaptcha", "test": True}) is not None
+    assert hcaptcha_lab.validate_settings(hc_default, {"captcha": "hcaptcha", "test": False}) is None
+    assert hcaptcha_lab.validate_settings(hc_custom, {"captcha": "hcaptcha", "test": False, "supports_vision": False}) is not None
+    assert hcaptcha_lab.validate_settings(hc_custom, {"captcha": "hcaptcha", "test": False, "supports_vision": True}) is None
+    capsys.readouterr()

@@ -1,7 +1,6 @@
 """Vectorized offline 4x4 effort-level parameter sweep with grouped CV and bootstrap CIs.
 
-Reproduces the statistical methodology of `reports/labels/next/boxgrid/liquid/rules.py`,
-`every_sweep.py`, `chosen.py`, and `lib.py`:
+Performs an exhaustive offline parameter sweep over recorded 4x4 grids:
 - Precomputes `boxmax` tensors for recorded box asks (`whole_grid`, `every`, `windows`).
 - Sweeps close-up pass modes (`capture`, `506`, `avg`), scoring rules, selection cutoffs,
   skip thresholds, gap rules, exemption thresholds, box confidences, cover, and inside.
@@ -86,7 +85,7 @@ def grouped_bootstrap_diff(
     n_boot: int = 4000,
     seed: int = 11,
 ) -> dict[str, float]:
-    """Paired grouped bootstrap 95% CI for `(a - b)` grids right per pass (`lib.py:boot`)."""
+    """Paired grouped bootstrap 95% CI for `(a - b)` grids right per pass."""
     if isinstance(n_boot, bool) or n_boot < 1:
         raise ValueError(f"n_boot must be >= 1, got {n_boot}")
     d = (a.astype(np.float64) - b.astype(np.float64)).mean(axis=0)

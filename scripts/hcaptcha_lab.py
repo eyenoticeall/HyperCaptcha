@@ -1,4 +1,4 @@
-"""Capture or answer hCaptcha grid challenges on the local lab page.
+"""Capture or answer hCaptcha grid challenges on the local lab page in Camoufox.
 
 Only hCaptcha's grid task is handled: nine pictures and one instruction. hCaptcha also serves
 tasks of other kinds (dragging a piece, clicking a point, following a moving object). Those are
@@ -12,111 +12,53 @@ middle of each picture the model selects.
 
 import argparse
 import base64
-import ipaddress
 import json
-import socket
-from contextlib import contextmanager
 from pathlib import Path
 from time import monotonic
-from urllib.parse import urlsplit
-from uuid import uuid4
 
-from playwright.sync_api import Error as PlaywrightError
-from playwright.sync_api import TimeoutError as BrowserTimeout
-from playwright.sync_api import sync_playwright
+try:
+    from ._common import (
+        BROWSER,
+        SOURCE,
+        BrowserTimeout,
+        PlaywrightError,
+        fetch_lab_config,
+        open_camoufox,
+        positive_float,
+        positive_int,
+        post,
+        requires_vision_check,
+        resolve_model_name,
+        run_interactive,
+        run_smoke,
+        run_vision_check,
+        supports_vision,
+        validate_captcha_config,
+        validate_lab_url,
+    )
+except ImportError:
+    from _common import (
+        BROWSER,
+        SOURCE,
+        BrowserTimeout,
+        PlaywrightError,
+        fetch_lab_config,
+        open_camoufox,
+        positive_float,
+        positive_int,
+        post,
+        requires_vision_check,
+        resolve_model_name,
+        run_interactive,
+        run_smoke,
+        run_vision_check,
+        supports_vision,
+        validate_captcha_config,
+        validate_lab_url,
+    )
 
 CHECKBOX_FRAME = 'iframe[title*="checkbox"]'
 CHALLENGE_FRAME = 'iframe[title*="hCaptcha challenge"]'
-
-
-def positive_int(value):
-    number = int(value)
-    if number <= 0:
-        raise argparse.ArgumentTypeError("expected a positive integer")
-    return number
-
-
-def is_local_hostname(hostname, resolver=socket.getaddrinfo):
-    """Return whether `hostname` is localhost, a `.localhost` subdomain, or resolves only to loopback."""
-    if not hostname:
-        return False
-    host = hostname.rstrip(".").lower()
-    if not host:
-        return False
-    if host == "localhost" or host.endswith(".localhost"):
-        return True
-    try:
-        return ipaddress.ip_address(host.split("%", 1)[0]).is_loopback
-    except ValueError:
-        pass
-    try:
-        infos = resolver(host, None)
-    except OSError:
-        return False
-    addresses = [info[4][0] for info in infos if info and len(info) >= 5 and info[4]]
-    if not addresses:
-        return False
-    try:
-        return all(ipaddress.ip_address(addr.split("%", 1)[0]).is_loopback for addr in addresses)
-    except ValueError:
-        return False
-
-
-def validate_lab_url(raw_url, resolver=socket.getaddrinfo):
-    """Validate and normalize `--url`, ensuring it targets the local lab server."""
-    parts = urlsplit(raw_url)
-    try:
-        _ = parts.port
-    except ValueError:
-        return None
-    if (
-        parts.scheme != "http"
-        or not is_local_hostname(parts.hostname, resolver=resolver)
-        or parts.username is not None
-        or parts.password is not None
-        or parts.path not in ("", "/")
-        or parts.query
-        or parts.fragment
-    ):
-        return None
-    return raw_url.rstrip("/")
-
-
-def resolve_model_name(settings, record):
-    """Return the trial's display model name from /config or model replies."""
-    model_name = settings.get("model_name")
-    if model_name:
-        return model_name
-    for image_round in record.get("rounds", ()):
-        model = image_round.get("model")
-        if isinstance(model, dict) and model.get("model_name"):
-            return model["model_name"]
-    provider = settings.get("provider")
-    model = settings.get("model")
-    if provider and model:
-        return f"{provider}/{model}"
-    return model or None
-
-
-def post(page, path, trial_id, fields):
-    origin = urlsplit(page.url)._replace(path="", query="", fragment="").geturl()
-    response = page.request.post(
-        f"{origin}/{path}",
-        headers={"Origin": origin},
-        data={
-            "trial_id": trial_id,
-            "source": urlsplit(page.url).fragment.removeprefix("source="),
-            **fields,
-        },
-        timeout=125_000,
-    )
-    try:
-        result = response.json()
-    except ValueError as error:
-        raise RuntimeError(f"{path} returned HTTP {response.status}") from error
-    if not response.ok:
-        raise RuntimeError(result.get("error", f"{path} returned HTTP {response.status}"))
-    return result
 
 
 class Challenge:
@@ -230,7 +172,7 @@ def widget_state(page):
 
 
 def run_trial(page, args, url, record):
-    page.goto(f"{url}/#source={args.browser}", wait_until="domcontentloaded")
+    page.goto(f"{url}/#source={SOURCE}", wait_until="domcontentloaded")
     page.wait_for_function("document.querySelector('#trial-id').textContent.length > 0")
     trial_id = page.locator("#trial-id").inner_text()
     record["trial_id"] = trial_id
@@ -268,7 +210,7 @@ def run_trial(page, args, url, record):
         return
 
     directory = args.output / trial_id
-    directory.mkdir()
+    directory.mkdir(parents=True, exist_ok=True)
     record["checkbox_to_challenge_ms"] = elapsed()
     rounds = record["rounds"]
     passed_over = record.setdefault("passed_over", [])
@@ -423,82 +365,189 @@ def run_trial(page, args, url, record):
             return
 
 
-@contextmanager
-def open_browser():
-    with (
-        sync_playwright() as playwright,
-        playwright.chromium.launch(channel="chrome", headless=True) as browser,
-    ):
-        yield browser
+def open_browser(headless: bool = True):
+    """Launch Camoufox via `scripts/_common.py`."""
+    return open_camoufox(headless=headless)
 
 
-def main():
+def build_parser():
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    parser.add_argument("--url", default="http://hypercaptcha.localhost:8765")
-    parser.add_argument("--trials", type=positive_int, default=1)
     parser.add_argument(
-        "--max-rounds", type=positive_int, default=24, help="The most grid pages answered in one trial."
+        "--url",
+        default="http://hypercaptcha.localhost:8765",
+        help="Local lab server URL (default: http://hypercaptcha.localhost:8765).",
+    )
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
+        "--interactive",
+        action="store_true",
+        help="Open a headed Camoufox window to the lab URL and wait until closed.",
+    )
+    mode.add_argument(
+        "--smoke",
+        action="store_true",
+        help="Verify the public hCaptcha test widget (--hcaptcha-test-key) once and exit.",
     )
     parser.add_argument(
-        "--max-stages", type=positive_int, default=1,
+        "--headed",
+        action="store_true",
+        help="Show the Camoufox browser window instead of running headless (--interactive is always headed).",
+    )
+    parser.add_argument(
+        "--trials",
+        type=positive_int,
+        default=None,
+        help="Number of automated trials to run (default: 1).",
+    )
+    parser.add_argument(
+        "--max-rounds",
+        type=positive_int,
+        default=None,
+        help="The most grid pages answered in one trial (default: 24).",
+    )
+    parser.add_argument(
+        "--max-stages",
+        type=positive_int,
+        default=None,
         help="Keep going after hCaptcha rejects an answer, until it passes the trial or has"
-        " rejected this many challenges.",
+        " rejected this many challenges (default: 1).",
     )
     parser.add_argument(
-        "--max-refreshes", type=positive_int, default=12,
-        help="The most tasks of other kinds to pass over in one trial before giving up.",
+        "--max-refreshes",
+        type=positive_int,
+        default=None,
+        help="The most tasks of other kinds to pass over in one trial before giving up (default: 12).",
     )
     parser.add_argument(
-        "--device-scale-factor", type=float, default=2.0,
+        "--device-scale-factor",
+        type=positive_float,
+        default=None,
         help="Browser pixel density. hCaptcha draws its canvas at twice the page's size, so 2"
-        " captures the pictures at the detail they were drawn with.",
-    )
-    parser.add_argument("--output", default=Path("reports/hcaptcha"), type=Path)
-    parser.add_argument(
-        "--submit", action="store_true", help="Ask the configured model and submit its selections."
+        " captures the pictures at the detail they were drawn with (default: 2.0).",
     )
     parser.add_argument(
-        "--fast", action=argparse.BooleanOptionalAction, default=True,
-        help="Check the page every 50 milliseconds. --no-fast checks every 200.",
+        "--output",
+        type=Path,
+        default=None,
+        help="Directory for trial screenshots and JSONL logs (default: reports/hcaptcha).",
     )
-    args = parser.parse_args()
-    args.browser = "chrome"
+    parser.add_argument(
+        "--submit",
+        action="store_true",
+        help="Ask the configured model and submit its selections during automated trials.",
+    )
+    parser.add_argument(
+        "--fast",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Check the page every 50 ms (default: on; --no-fast checks every 200 ms).",
+    )
+    return parser
+
+
+def parse_args(argv=None):
+    parser = build_parser()
+    args = parser.parse_args(argv)
     url = validate_lab_url(args.url)
     if url is None:
         parser.error("--url must be a localhost or loopback URL printed by the lab server.")
 
-    with open_browser() as browser:
-        with browser.new_context() as config:
-            response = config.request.get(f"{url}/config")
-            if not response.ok:
-                parser.error(f"The lab returned HTTP {response.status}.")
-            settings = response.json()
-        if settings.get("captcha") != "hcaptcha":
-            parser.error("Start the lab with --captcha hcaptcha.")
-        if settings.get("test"):
-            parser.error("hCaptcha's test key never shows a challenge. Use your own key.")
-        supports_vision = settings.get("supports_vision")
-        if supports_vision is None:
-            supports_vision = settings.get("provider") in ("jev", "vllm", "liquid", "custom")
-        if args.submit and not supports_vision:
-            parser.error("Start the lab with a vision provider before using --submit.")
+    special_mode = "--interactive" if args.interactive else "--smoke" if args.smoke else None
+    if special_mode is not None:
+        bad = []
+        if args.submit:
+            bad.append("--submit")
+        if args.trials is not None:
+            bad.append("--trials")
+        if args.max_rounds is not None:
+            bad.append("--max-rounds")
+        if args.max_stages is not None:
+            bad.append("--max-stages")
+        if args.max_refreshes is not None:
+            bad.append("--max-refreshes")
+        if args.device_scale_factor is not None:
+            bad.append("--device-scale-factor")
+        if args.output is not None:
+            bad.append("--output")
+        if args.fast is not None:
+            bad.append("--fast" if args.fast else "--no-fast")
+        if bad:
+            parser.error(f"{', '.join(bad)} cannot be used with {special_mode}.")
+
+    if args.trials is None:
+        args.trials = 1
+    if args.max_rounds is None:
+        args.max_rounds = 24
+    if args.max_stages is None:
+        args.max_stages = 1
+    if args.max_refreshes is None:
+        args.max_refreshes = 12
+    if args.device_scale_factor is None:
+        args.device_scale_factor = 2.0
+    if args.output is None:
+        args.output = Path("reports/hcaptcha")
+    if args.fast is None:
+        args.fast = True
+    return parser, args, url
+
+
+def validate_settings(args, settings):
+    """Validate `/config` for the requested mode, returning an error message or None."""
+    captcha_error = validate_captcha_config(settings, "hcaptcha")
+    if captcha_error is not None:
+        return captcha_error
+    if args.interactive:
+        return None
+    if args.smoke:
+        if not settings.get("test"):
+            return "--smoke requires starting the lab with --hcaptcha-test-key."
+        return None
+    if settings.get("test"):
+        return "hCaptcha's test key never shows a challenge. Use --smoke to verify the test key, or your own key for trials."
+    if args.submit and not supports_vision(settings):
+        return "Start the lab with a vision provider before using --submit."
+    return None
+
+
+def main(argv=None):
+    parser, args, url = parse_args(argv)
+    headless = False if args.interactive else not args.headed
+
+    with open_browser(headless=headless) as browser:
+        try:
+            settings = fetch_lab_config(browser, url)
+        except RuntimeError as error:
+            parser.error(str(error))
+
+        config_error = validate_settings(args, settings)
+        if config_error is not None:
+            parser.error(config_error)
+
+        if args.interactive:
+            run_interactive(browser, url, heading="hCaptcha widget")
+            return
+
+        if args.smoke:
+            record = run_smoke(
+                browser,
+                url,
+                heading="hCaptcha widget",
+                click_checkbox=lambda page: page.frame_locator(CHECKBOX_FRAME)
+                .locator("#checkbox")
+                .click(timeout=45_000),
+                result_selector="#verdict",
+            )
+            if not record.get("result", {}).get("valid"):
+                raise SystemExit(1)
+            return
 
         args.output.mkdir(parents=True, exist_ok=True)
         vision_check_id = None
-        requires_vision_check = settings.get("requires_vision_check")
-        if requires_vision_check is None:
-            requires_vision_check = settings.get("provider") in ("jev", "vllm", "liquid", "custom")
-        if args.submit and requires_vision_check:
-            vision_check_id = str(uuid4())
-            with browser.new_context() as context:
-                page = context.new_page()
-                page.goto(f"{url}/config#source={args.browser}", wait_until="commit")
-                check = post(page, "vision-check", vision_check_id, {})
-            with (args.output / "vision-checks.jsonl").open("a") as log:
-                print(json.dumps(check), file=log)
-            print(json.dumps(check), flush=True)
-            if not check["result"]["passed"]:
+        if args.submit and requires_vision_check(settings):
+            vision_check_id, check = run_vision_check(browser, url, args.output)
+            if not check.get("result", {}).get("passed"):
                 parser.exit(1, "The decision model did not pass the vision check. No challenges were submitted.\n")
+
         for _ in range(args.trials):
             with browser.new_context(
                 locale="en-US",
@@ -514,11 +563,11 @@ def main():
                     record.update(outcome="runner_error", detail=detail)
                 if vision_check_id is not None:
                     record["vision_check_id"] = vision_check_id
-            record.update(captcha="hcaptcha", browser=args.browser, browser_version=browser.version)
+            record.update(captcha="hcaptcha", browser=BROWSER, browser_version=browser.version)
             model_name = resolve_model_name(settings, record)
             if model_name is not None:
                 record["model_name"] = model_name
-            with (args.output / "trials.jsonl").open("a") as log:
+            with (args.output / "trials.jsonl").open("a", encoding="utf-8") as log:
                 print(json.dumps(record), file=log)
             print(json.dumps(record), flush=True)
 
