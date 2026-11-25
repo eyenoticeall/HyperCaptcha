@@ -30,6 +30,12 @@ HyperCaptcha lets you dial how much work the harness asks a model to do on each 
   <img src="docs/assets/results-effort-frontier.png" alt="4x4 CAPTCHA solve accuracy vs input token budget and compute wait across HyperCaptcha effort levels for vLLM/d3-ultra, Liquid/d1.2-ultra, and typesafe/Jev" width="100%" />
 </p>
 
+### Side-by-Side Tile Selections on Real 4×4 Grids
+
+<p align="center">
+  <img src="docs/assets/example-model-selections.png" alt="Side-by-side comparison of real recorded tile selections from vLLM/d3-ultra, Liquid/d1.2-ultra, and typesafe/Jev on identical 4x4 reCAPTCHA crosswalk and traffic-light grids" width="100%" />
+</p>
+
 - **Why `--effort high` is the default:** Inside HyperCaptcha, `vLLM/d3-ultra` at `high` solves **`82.9%` (`281/339`)** of 4×4 test grids — within 1 grid of `max` (`83.2%`, `282/339`) while using **`4,404` fewer input tokens** and cutting median provider compute wait roughly in half (**`282 ms`** vs. **`556 ms`**).
 - **Comparing decision models in the harness:** `Liquid/d1.2-ultra` peaks at **`72.3%`** (`high`/`max`), while `typesafe/Jev` reaches **`53.4%`** in its single-request default or **`68.8%`** with multi-view + box verification on an earlier 311-grid label pass (and **`68.0%`** vs. `d3-ultra`'s **`80.0%`** in a live 50-attempt reCAPTCHA v2 Enterprise run without box checks).
 - **Offline vs. live scope:** The 4×4 box verification, `--effort` tiers, `Liquid/*`, and `hCaptcha` solve rates have been measured offline or on test keys, not yet on live production verdicts. Full methodology, dataset details, additional models (`Liquid/d1.2`), and caveats live in [docs/RESULTS.md](docs/RESULTS.md) and [docs/BENCHMARK_REPORT_2026-11-15.md](docs/BENCHMARK_REPORT_2026-11-15.md).

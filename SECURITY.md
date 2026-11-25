@@ -11,7 +11,7 @@ HyperCaptcha is a localhost-only browser and model evaluation harness intended f
 ## Credential & Data Handling Policy
 
 - **Never commit secrets**: Do not commit `.env`, `.env.*` (other than `.env.example`), API keys, site/secret keys, bearer tokens, or cookies to this repository.
-- **Never commit raw CAPTCHA datasets or recordings**: Keep local captures, screenshots, video recordings, raw human labels, and live run logs inside gitignored directories (`/reports/`, `/datasets/`, `/recordings/`, `/references/`).
+- **Never commit raw CAPTCHA datasets or recordings**: Keep local captures, screenshots, video recordings, raw human labels, and live run logs inside gitignored directories (`/reports/`, `/datasets/`, `/recordings/`, `/references/`). The sole exception is the single illustrative comparison graphic in `docs/assets/example-model-selections.png` used in the README.
 - **Sanitized test fixtures only**: Committed regression fixtures in `tests/fixtures/` must remain image-free and label-free (containing only sanitized request/score payloads and synthetic decision traces).
 
 ## Reporting a Vulnerability
