@@ -1,0 +1,329 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>HyperCaptcha Tile Truth Labeling</title>
+<style>
+  :root {
+    --bg: #f5f6f4;
+    --panel: #ffffff;
+    --ink: #1b1f1d;
+    --muted: #5d6762;
+    --line: #d5dbd7;
+    --yes: #138a4a;
+    --yes-wash: rgba(19, 138, 74, 0.28);
+    --maybe: #b26a00;
+    --maybe-wash: rgba(178, 106, 0, 0.22);
+    --focus: #2b5fd9;
+    --font-body: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    --font-mono: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #141816; --panel: #1d2220; --ink: #e8ece9; --muted: #9aa59f; --line: #333b37;
+      --yes: #3fcf80; --yes-wash: rgba(63, 207, 128, 0.30); --maybe: #f0a83a; --maybe-wash: rgba(240, 168, 58, 0.26);
+      --focus: #7aa2ff; color-scheme: dark;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #141816; --panel: #1d2220; --ink: #e8ece9; --muted: #9aa59f; --line: #333b37;
+    --yes: #3fcf80; --yes-wash: rgba(63, 207, 128, 0.30); --maybe: #f0a83a; --maybe-wash: rgba(240, 168, 58, 0.26);
+    --focus: #7aa2ff; color-scheme: dark;
+  }
+  body {
+    margin: 0;
+    background: var(--bg); color: var(--ink); font-family: var(--font-body); font-size: 15px; line-height: 1.45;
+    padding: 20px 16px 32px;
+  }
+  .wrap { max-width: 580px; margin: 0 auto; display: flex; flex-direction: column; gap: 14px; }
+  header { display: flex; flex-direction: column; gap: 6px; }
+  .head-row { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+  h1 { font-size: 1.15rem; font-weight: 600; margin: 0; }
+  .rule { color: var(--muted); margin: 0; max-width: 65ch; font-size: 0.92rem; }
+  .legend { display: flex; flex-wrap: wrap; gap: 8px 16px; color: var(--muted); font-size: 0.85rem; }
+  .chip { display: inline-flex; align-items: center; gap: 6px; }
+  .swatch { width: 14px; height: 14px; border-radius: 3px; border: 3px solid var(--yes); box-sizing: border-box; }
+  .swatch.maybe { border: 3px dashed var(--maybe); }
+  .status { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; font-family: var(--font-mono); font-size: 0.85rem; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .bar { height: 4px; background: var(--line); border-radius: 2px; overflow: hidden; }
+  .bar > span { display: block; height: 100%; background: var(--yes); width: 0; transition: width 0.2s; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px; display: flex; flex-direction: column; gap: 10px; }
+  .meta { font-family: var(--font-mono); font-size: 0.78rem; color: var(--muted); display: flex; justify-content: space-between; gap: 8px; }
+  .prompt { margin: 0; font-size: 0.95rem; color: var(--muted); }
+  .prompt strong { display: block; color: var(--ink); font-size: 1.3rem; font-weight: 600; letter-spacing: 0.01em; }
+  .prompt .sub { font-size: 0.82rem; display: block; margin-top: 2px; }
+  .stage { position: relative; width: 100%; max-width: 100%; aspect-ratio: 1 / 1; border-radius: 4px; overflow: hidden; background: var(--line); user-select: none; -webkit-user-select: none; }
+  .stage img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: fill; display: block; }
+  .tiles { position: absolute; inset: 0; display: grid; }
+  .tile { position: relative; border: 0; margin: 0; padding: 0; background: transparent; cursor: pointer; -webkit-tap-highlight-color: transparent; }
+  .tile:focus-visible { outline: 3px solid var(--focus); outline-offset: -3px; }
+  .tile .num { position: absolute; top: 4px; left: 4px; font-family: var(--font-mono); font-size: 11px; line-height: 1; padding: 3px 4px; border-radius: 3px; background: rgba(0, 0, 0, 0.62); color: #fff; }
+  .tile[data-state="yes"] { box-shadow: inset 0 0 0 4px var(--yes); background: var(--yes-wash); }
+  .tile[data-state="maybe"] { background: var(--maybe-wash); }
+  .tile[data-state="maybe"]::after { content: ""; position: absolute; inset: 3px; border: 3px dashed var(--maybe); border-radius: 2px; pointer-events: none; }
+  .tile .badge { position: absolute; right: 5px; bottom: 5px; font-size: 12px; font-weight: 600; padding: 2px 6px; border-radius: 999px; color: #fff; }
+  .tile[data-state="yes"] .badge { background: var(--yes); }
+  .tile[data-state="maybe"] .badge { background: var(--maybe); }
+  .tile[data-state="none"] .badge { display: none; }
+  .summary { font-size: 0.85rem; color: var(--muted); margin: 0; min-height: 1.3em; }
+  .flag { display: flex; align-items: center; gap: 8px; font-size: 0.9rem; color: var(--muted); cursor: pointer; }
+  .actions { display: flex; gap: 10px; flex-wrap: wrap; }
+  button.act { font: inherit; font-weight: 500; border-radius: 8px; padding: 9px 14px; border: 1px solid var(--line); background: var(--panel); color: var(--ink); cursor: pointer; }
+  button.act.small { padding: 4px 10px; font-size: 0.8rem; }
+  button.act.primary { background: var(--yes); border-color: var(--yes); color: #fff; flex: 1 1 auto; }
+  button.act:disabled { opacity: 0.45; cursor: default; }
+  button.act:focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; }
+  .note { font-size: 0.85rem; color: var(--muted); margin: 0; }
+  .note.warn { color: var(--maybe); }
+  .shortcuts { font-family: var(--font-mono); font-size: 0.78rem; color: var(--muted); margin: 0; }
+  .strip { display: flex; flex-wrap: wrap; gap: 4px; }
+  .dot { width: 14px; height: 14px; border-radius: 3px; border: 1px solid var(--line); background: var(--panel); padding: 0; cursor: pointer; }
+  .dot.done { background: var(--yes); border-color: var(--yes); }
+  .dot.flagged { background: var(--maybe); border-color: var(--maybe); }
+  .dot.current { outline: 2px solid var(--focus); outline-offset: 1px; }
+  @media (prefers-reduced-motion: reduce) { .bar > span { transition: none; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="head-row">
+      <h1>Which squares contain the target?</h1>
+      <button class="act small" id="theme" type="button" title="Toggle theme">Theme: Auto</button>
+    </div>
+    <p class="rule">Click once for <strong>target</strong> (must be selected), click again for <strong>sliver</strong> (barely in, optional), and a third time to clear. Save with no squares marked if the target is absent.</p>
+    <div class="legend">
+      <span class="chip"><span class="swatch"></span>Target (must select)</span>
+      <span class="chip"><span class="swatch maybe"></span>Sliver (optional)</span>
+    </div>
+  </header>
+
+  <div>
+    <div class="status"><span id="count">0 of 0 saved</span><span id="pos">Loading…</span></div>
+    <div class="bar" aria-hidden="true"><span id="barfill"></span></div>
+  </div>
+
+  <section class="card" id="card" aria-live="polite">
+    <div class="meta"><span id="grid-id"></span><span id="grid-service"></span></div>
+    <p class="prompt" id="prompt"><span id="lead">Select all matching squares</span><strong id="target">…</strong><span class="sub" id="sub"></span></p>
+    <div class="stage" id="stage">
+      <img id="img" alt="">
+      <div class="tiles" id="tiles"></div>
+    </div>
+    <p class="summary" id="summary"></p>
+    <label class="flag"><input type="checkbox" id="unclear"> Unclear / ambiguous ground truth</label>
+    <div class="actions">
+      <button class="act" id="prev" type="button">Previous</button>
+      <button class="act" id="clear" type="button">Clear</button>
+      <button class="act primary" id="save" type="button">Save and next</button>
+    </div>
+    <p class="note" id="note">Loading dataset…</p>
+    <p class="shortcuts">Keys: Enter = save &amp; next · ←/→ = prev/next · u = unclear · c = clear</p>
+  </section>
+
+  <section>
+    <p class="note" style="margin-bottom:6px">Jump to a grid. Green is saved, amber is flagged as unclear.</p>
+    <div class="strip" id="strip"></div>
+  </section>
+</div>
+
+<script>
+let ITEMS = [];
+const state = new Map(); // id -> {target:Set, sliver:Set, unclear:boolean}
+const saved = new Map(); // id -> saved record
+let index = 0, saving = false;
+
+const $ = (id) => document.getElementById(id);
+const tilesEl = $("tiles"), noteEl = $("note");
+
+// Theme toggle (Auto -> Dark -> Light)
+const themes = ["auto", "dark", "light"];
+let themeIdx = 0;
+$("theme").addEventListener("click", () => {
+  themeIdx = (themeIdx + 1) % themes.length;
+  const mode = themes[themeIdx];
+  if (mode === "auto") document.documentElement.removeAttribute("data-theme");
+  else document.documentElement.setAttribute("data-theme", mode);
+  $("theme").textContent = "Theme: " + mode[0].toUpperCase() + mode.slice(1);
+});
+
+function draft(id) {
+  if (!state.has(id)) {
+    const s = saved.get(id);
+    state.set(id, {
+      target: new Set(s ? (s.target || []) : []),
+      sliver: new Set(s ? (s.sliver || []) : []),
+      unclear: s ? !!s.unclear : false,
+    });
+  }
+  return state.get(id);
+}
+
+function tileState(d, t) {
+  return d.target.has(t) ? "yes" : d.sliver.has(t) ? "maybe" : "none";
+}
+
+function cycle(t) {
+  if (!ITEMS.length) return;
+  const item = ITEMS[index], d = draft(item.id);
+  const s = tileState(d, t);
+  d.target.delete(t); d.sliver.delete(t);
+  if (s === "none") d.target.add(t);
+  else if (s === "yes") d.sliver.add(t);
+  renderTiles();
+}
+
+function renderTiles() {
+  if (!ITEMS.length) return;
+  const item = ITEMS[index], d = draft(item.id), n = item.layout;
+  tilesEl.style.gridTemplateColumns = `repeat(${n}, 1fr)`;
+  tilesEl.style.gridTemplateRows = `repeat(${n}, 1fr)`;
+  if (tilesEl.childElementCount !== n * n) {
+    tilesEl.replaceChildren();
+    for (let t = 1; t <= n * n; t++) {
+      const b = document.createElement("button");
+      b.type = "button"; b.className = "tile"; b.dataset.t = t;
+      const num = document.createElement("span"); num.className = "num"; num.textContent = t;
+      const badge = document.createElement("span"); badge.className = "badge";
+      b.append(num, badge);
+      b.addEventListener("click", () => cycle(t));
+      tilesEl.append(b);
+    }
+  }
+  for (const b of tilesEl.children) {
+    const t = Number(b.dataset.t), s = tileState(d, t);
+    b.dataset.state = s;
+    b.querySelector(".badge").textContent = s === "yes" ? "✓" : s === "maybe" ? "sliver" : "";
+    b.setAttribute("aria-label", `Square ${t}: ${s === "yes" ? "target" : s === "maybe" ? "sliver, optional" : "empty"}`);
+  }
+  const tg = [...d.target].sort((a, b) => a - b), sl = [...d.sliver].sort((a, b) => a - b);
+  $("summary").textContent = tg.length || sl.length
+    ? `Target: ${tg.join(", ") || "none"}${sl.length ? `   ·   Sliver: ${sl.join(", ")}` : ""}`
+    : "No squares marked. Saving now marks this grid as having no target.";
+}
+
+function render() {
+  if (!ITEMS.length) {
+    $("pos").textContent = "0 grids";
+    noteEl.textContent = "Dataset manifest is empty.";
+    return;
+  }
+  const item = ITEMS[index];
+  $("grid-id").textContent = item.id;
+  $("grid-service").textContent = `${item.service} · ${item.layout}×${item.layout}${item.allows_skipping ? " · skippable" : ""}`;
+  $("lead").textContent = item.lead;
+  $("target").textContent = item.target;
+  $("sub").textContent = item.note || "";
+  $("img").src = item.image_url;
+  $("img").alt = `${item.lead} ${item.target}, ${item.layout} by ${item.layout} grid`;
+  $("unclear").checked = draft(item.id).unclear;
+  $("pos").textContent = `Grid ${index + 1} of ${ITEMS.length}${saved.has(item.id) ? " · saved" : ""}`;
+  $("prev").disabled = index === 0;
+  renderTiles();
+  renderProgress();
+}
+
+function renderProgress() {
+  $("count").textContent = `${saved.size} of ${ITEMS.length} saved`;
+  $("barfill").style.width = ITEMS.length ? `${(100 * saved.size) / ITEMS.length}%` : "0%";
+  const strip = $("strip");
+  if (strip.childElementCount !== ITEMS.length) {
+    strip.replaceChildren(...ITEMS.map((it, i) => {
+      const b = document.createElement("button");
+      b.type = "button"; b.className = "dot"; b.title = `${i + 1}: ${it.id}`;
+      b.setAttribute("aria-label", `Go to grid ${i + 1}`);
+      b.addEventListener("click", () => { index = i; render(); });
+      return b;
+    }));
+  }
+  [...strip.children].forEach((b, i) => {
+    const s = saved.get(ITEMS[i].id);
+    b.className = "dot" + (s ? (s.unclear ? " flagged" : " done") : "") + (i === index ? " current" : "");
+  });
+}
+
+async function saveAndNext() {
+  if (saving || !ITEMS.length) return;
+  const item = ITEMS[index], d = draft(item.id);
+  const body = {
+    id: item.id,
+    layout: item.layout,
+    target: [...d.target].sort((a, b) => a - b),
+    sliver: [...d.sliver].sort((a, b) => a - b),
+    unclear: d.unclear,
+  };
+  saving = true; $("save").disabled = true;
+  try {
+    const resp = await fetch("/api/labels", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+    saved.set(item.id, data);
+    noteEl.textContent = `Saved grid ${index + 1} (${item.id}).`; noteEl.className = "note";
+    const next = ITEMS.findIndex((it, i) => i > index && !saved.has(it.id));
+    index = next >= 0 ? next : Math.min(index + 1, ITEMS.length - 1);
+    render();
+  } catch (e) {
+    noteEl.textContent = `Save failed: ${e.message}`;
+    noteEl.className = "note warn";
+  } finally {
+    saving = false; $("save").disabled = false;
+  }
+}
+
+$("save").addEventListener("click", saveAndNext);
+$("prev").addEventListener("click", () => { if (index > 0) { index--; render(); } });
+$("clear").addEventListener("click", () => {
+  if (!ITEMS.length) return;
+  const d = draft(ITEMS[index].id);
+  d.target.clear(); d.sliver.clear();
+  renderTiles();
+});
+$("unclear").addEventListener("change", (e) => {
+  if (!ITEMS.length) return;
+  draft(ITEMS[index].id).unclear = e.target.checked;
+});
+document.addEventListener("keydown", (e) => {
+  if (e.target.closest && e.target.closest("input, textarea")) return;
+  if (e.key === "Enter") { e.preventDefault(); saveAndNext(); }
+  else if (e.key === "ArrowLeft" && index > 0) { index--; render(); }
+  else if (e.key === "ArrowRight" && index < ITEMS.length - 1) { index++; render(); }
+  else if (e.key === "u" || e.key === "U") {
+    if (!ITEMS.length) return;
+    const d = draft(ITEMS[index].id);
+    d.unclear = !d.unclear;
+    $("unclear").checked = d.unclear;
+  } else if (e.key === "c" || e.key === "C") {
+    if (!ITEMS.length) return;
+    const d = draft(ITEMS[index].id);
+    d.target.clear(); d.sliver.clear();
+    renderTiles();
+  }
+});
+
+(async () => {
+  try {
+    const [itemsResp, labelsResp] = await Promise.all([fetch("/api/items"), fetch("/api/labels")]);
+    if (!itemsResp.ok || !labelsResp.ok) throw new Error("failed to load data from local server");
+    ITEMS = await itemsResp.json();
+    const existing = await labelsResp.json();
+    for (const [id, rec] of Object.entries(existing)) saved.set(id, rec);
+    const resume = ITEMS.findIndex((it) => !saved.has(it.id));
+    index = resume >= 0 ? resume : 0;
+    noteEl.textContent = saved.size
+      ? `Resumed at first unsaved grid (${saved.size} already saved locally).`
+      : "Answers save directly to your local labels.jsonl file.";
+    noteEl.className = "note";
+    render();
+  } catch (e) {
+    noteEl.textContent = `Could not load labeling session: ${e.message}`;
+    noteEl.className = "note warn";
+  }
+})();
+</script>
+</body>
+</html>
