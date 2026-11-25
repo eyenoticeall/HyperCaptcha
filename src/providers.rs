@@ -2407,7 +2407,8 @@ type BoxReply = (BoxAsk, Result<(Vec<boxes::Found>, Value), String>);
 ///
 /// `replies` yields each box request's outcome as it arrives. The requests all left when the
 /// round began. Listening stops once every square is decided, unless `wait` asks for
-/// every reply, and at the first failure, which leaves the squares still undecided selected.
+/// every reply; a failed request is recorded and leaves any still-undecided squares selected,
+/// while sibling replies still drop any squares they do not reach regardless of arrival order.
 fn apply_box_rule(
     reply: &mut Reply,
     rule: BoxRule,
@@ -2429,19 +2430,21 @@ fn apply_box_rule(
     });
     let (mut heard, mut error) = (0, None);
     let mut replies = replies;
-    while heard < rule.requests() && error.is_none() && (wait || !vote.settled()) {
+    while heard < rule.requests() && (wait || !vote.settled()) {
         let Some((ask, result)) = replies.next() else {
-            error = Some("a box request worker stopped".to_owned());
+            error.get_or_insert_with(|| "a box request worker stopped".to_owned());
             break;
         };
+        heard += 1;
         let name = ask.name();
         match result {
             Ok((found, entry)) => {
                 vote.hear(ask, &found);
                 log[name] = entry;
-                heard += 1;
             }
-            Err(failure) => error = Some(format!("{name}: {failure}")),
+            Err(failure) => {
+                error.get_or_insert_with(|| format!("{name}: {failure}"));
+            }
         }
     }
     let removed = vote.dropped();
@@ -3181,6 +3184,18 @@ mod tests {
         let heard = vec![
             (BoxAsk::Windows, Ok((vec![on(6)], Value::Null))),
             (BoxAsk::Whole, Err("timed out".to_owned())),
+        ];
+        apply_box_rule(&mut round, rule, false, heard.into_iter());
+        assert_eq!(picks(&round), [6, 11]);
+        let log = &round.decision_components.as_ref().unwrap()["boxes"];
+        assert_eq!(log["removed"], json!([7]));
+        assert_eq!(log["error"], "whole_grid: timed out");
+        // Arrival order must not change the result: whole-grid failing before windows arrive
+        // still drops square 7 while keeping square 6 undecided.
+        let mut round = reply();
+        let heard = vec![
+            (BoxAsk::Whole, Err("timed out".to_owned())),
+            (BoxAsk::Windows, Ok((vec![on(6)], Value::Null))),
         ];
         apply_box_rule(&mut round, rule, false, heard.into_iter());
         assert_eq!(picks(&round), [6, 11]);
