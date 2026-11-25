@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/assets/banner.png" alt="HyperCaptcha: Open-source research harness for multimodal CAPTCHA evaluation" width="100%" />
+  <img src="docs/assets/banner.png" alt="HyperCaptcha: Open-source research harness for tuning and running multimodal decision models to solve CAPTCHAs with high accuracy" width="100%" />
 </p>
 
 <p align="center">
@@ -13,7 +13,7 @@
 
 # HyperCaptcha
 
-**HyperCaptcha** is an open-source Rust and Python harness for solving and benchmarking **Google reCAPTCHA** and **hCaptcha** challenges with multimodal decision models, live in Camoufox or offline on saved grids with `hypercaptcha-eval`.
+**HyperCaptcha** is an open-source Rust and Python research harness for tuning and running multimodal decision models to solve **Google reCAPTCHA** and **hCaptcha** challenges with high accuracy, live in Camoufox or offline on saved grids with `hypercaptcha-eval`.
 
 > **Research use only:** HyperCaptcha is built for research and should not be used on third-party sites without permission. See [SECURITY.md](SECURITY.md) · [Apache-2.0](LICENSE).
 
