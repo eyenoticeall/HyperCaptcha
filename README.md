@@ -4,11 +4,21 @@
 
 # HyperCaptcha
 
-**HyperCaptcha** is an open-source harness for solving and benchmarking **Google reCAPTCHA** and **hCaptcha** challenges with multimodal vision models.
-
-Rather than asking a model once on a raw screenshot, the Rust server breaks each challenge grid into whole-grid and close-up views, combines tile scores with optional bounding-box checks, and logs every answer alongside the CAPTCHA verdict. You can test models **live in Camoufox** against a local widget or **tune and evaluate them offline** on saved grids with `hypercaptcha-eval`.
+**HyperCaptcha** is an open-source Rust and Python harness for solving and benchmarking **Google reCAPTCHA** and **hCaptcha** challenges with multimodal decision models — live in Camoufox or offline on saved grids with `hypercaptcha-eval`.
 
 > **Localhost research lab:** HyperCaptcha only serves pages on `127.0.0.1` for testing with your own CAPTCHA keys, vendor test keys, or saved offline grids — not third-party sites. See [SECURITY.md](SECURITY.md) · [Apache-2.0](LICENSE).
+
+---
+
+## How the Harness Makes Selections
+
+Asking a vision model once on a raw screenshot leaves accuracy on the table — edge fragments get missed, background objects trigger false clicks, and small differences in image resizing shift borderline tiles. HyperCaptcha drives decision models with five concrete techniques:
+
+- **Multi-view tile scoring (whole grid + close-ups):** Every square is scored on the full grid for scene context and again in zoomed close-up crops for fine details (such as distant wheel edges or signal housings). On 4×4 grids at `--effort high` and `max`, close-ups are run at two resolutions (capture size + `506 px`) and averaged in log-odds.
+- **Neighbor-aware logistic scoring:** Instead of a naive 50/50 average, a fitted logistic rule combines each square's whole-grid score, close-up score, and strongest edge-adjacent neighbor scores — capturing continuity when a single object (like a bus or traffic light) spans adjacent 4×4 tiles.
+- **Skip-grid presence gate:** On skippable 4×4 challenges (*"If there are none, click skip"*), a parallel presence query checks whether the target exists anywhere on the grid before selecting tiles.
+- **Bounding-box verification (veto, not rescue):** At `--effort medium` and above, the harness asks the model to locate target instances with bounding boxes (up to 9 whole-grid boxes on `vLLM`, a single multi-instance query on `Liquid`, plus 16 zoomed per-tile windows at `max`). High-confidence picks (`≥ 95.3%` on `d3-ultra`) pass automatically; lower-confidence picks are dropped unless a confident box reaches into that square.
+- **Early-tile inference & reproducible preprocessing:** On dynamic 3×3 grids, replacement tiles are composited and scored as soon as they are fetched — ahead of the widget's reveal timer. Parallel crop batching, connection warming, hedged retries, and byte-exact Pillow/libjpeg encoding (`src/pillow.rs`) keep latency low and offline replays identical to live runs.
 
 ---
 
