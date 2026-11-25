@@ -623,12 +623,18 @@ def main():
             settings = response.json()
         if settings.get("mode") not in ("v2", "v2-enterprise") or settings.get("test"):
             parser.error("Use a live v2 or v2-enterprise checkbox key.")
-        if args.submit and settings.get("provider") not in ("jev", "vllm", "openai-chat"):
+        supports_vision = settings.get("supports_vision")
+        if supports_vision is None:
+            supports_vision = settings.get("provider") not in (None, "openai-completions")
+        if args.submit and not supports_vision:
             parser.error("Start the lab with a vision provider before using --submit.")
 
         args.output.mkdir(parents=True, exist_ok=True)
         vision_check_id = None
-        if args.submit and settings.get("provider") in ("jev", "vllm"):
+        requires_vision_check = settings.get("requires_vision_check")
+        if requires_vision_check is None:
+            requires_vision_check = settings.get("provider") in ("jev", "vllm", "liquid", "custom")
+        if args.submit and requires_vision_check:
             vision_check_id = str(uuid4())
             with browser.new_context() as context:
                 page = context.new_page()

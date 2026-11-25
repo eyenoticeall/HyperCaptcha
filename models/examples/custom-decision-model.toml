@@ -1,0 +1,41 @@
+# Minimal example configuration for a custom multimodal decision model.
+#
+# Run with:
+#   MY_DECISION_API_KEY=... cargo run -- serve --mode v2 \
+#     --model-config models/examples/custom-decision-model.toml --record
+#
+# After recording answers on labelled grids, fit weights and sweep effort levels with
+# `hypercaptcha-eval` and paste (or export) the `[tuning]` tables below.
+
+schema_version = 1
+service = "recaptcha"                  # "recaptcha" | "hcaptcha"
+name = "MyProvider/my-decision-model"
+provider = "custom"
+model_id = "my-decision-model-v1"
+
+[endpoint]
+# Use "systemone-assets" for endpoints that accept named `assets` (vLLM / TypeSafe style),
+# or "systemone-images" for endpoints that expect an ordered `images` data-URL list (Liquid style).
+dialect = "systemone-assets"
+base_url = "https://api.example.com/v1"
+api_key_env = "MY_DECISION_API_KEY"
+# extra_api_keys_env = "MY_DECISION_EXTRA_API_KEYS"
+image_format = "jpeg"                  # "jpeg" | "png"
+crop_filter = "bilinear"               # "bilinear" | "nearest"
+gzip = false
+max_images = 16                        # e.g. 8 for positional-images endpoints, 16 for named-assets
+multi_state_windows = true             # false => 16 parallel single-state window box requests
+supports_every_box = false             # true => model supports type="boxes" multi-instance queries
+return_meta = false
+hedge_on_stall = false
+warm_connections = false
+min_patch_tokens = false               # true => enforce 1.5 input tokens per 32x32 image patch floor
+# extra_headers = { "X-Custom-Header" = "example" }
+
+# Optional: omit `[tuning]` or keep `default_decision = "average"` before fitting weights.
+[tuning]
+default_decision = "average"
+
+[tuning.average_4x4]
+close_ups = ["capture"]
+select_from = 0.5

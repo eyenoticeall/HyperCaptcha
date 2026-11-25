@@ -26,7 +26,13 @@ pub const MOST_IMAGES: usize = 8;
 /// Rewrites a request that names its pictures in `assets` into one that lists them in
 /// `images`. Each mention of a picture's name in the state or the questions becomes its
 /// place in the list. Also returns the fewest input tokens the pictures can cost.
-pub fn request(mut request: Value) -> Result<(Value, u64)> {
+#[cfg(test)]
+pub fn request(request: Value) -> Result<(Value, u64)> {
+    request_with_limit(request, MOST_IMAGES)
+}
+
+/// Like [`request`], with an explicit per-request image cap.
+pub fn request_with_limit(mut request: Value, max_images: usize) -> Result<(Value, u64)> {
     let Some(Value::Object(assets)) = request
         .as_object_mut()
         .and_then(|fields| fields.remove("assets"))
@@ -45,8 +51,8 @@ pub fn request(mut request: Value) -> Result<(Value, u64)> {
         }
     }
     ensure!(
-        order.len() <= MOST_IMAGES,
-        "a Liquid request takes at most {MOST_IMAGES} pictures, and this one has {}",
+        order.len() <= max_images,
+        "a positional-images request takes at most {max_images} pictures, and this one has {}",
         order.len()
     );
     for part in ["state", "questions"] {
@@ -65,6 +71,22 @@ pub fn request(mut request: Value) -> Result<(Value, u64)> {
     }
     request["images"] = json!(images);
     Ok((request, tokens))
+}
+
+/// Computes the patch-token floor (1.5 tokens per 32 × 32 patch, rounded up per image) for a
+/// named-assets request without rewriting its format.
+pub fn assets_min_tokens(request: &Value) -> Result<u64> {
+    let Some(Value::Object(assets)) = request.get("assets") else {
+        return Ok(0);
+    };
+    let mut tokens = 0;
+    for (name, asset) in assets {
+        let data = asset["data_base64"]
+            .as_str()
+            .with_context(|| format!("the picture {name} has no data"))?;
+        tokens += picture_tokens(data).with_context(|| format!("measure the picture {name}"))?;
+    }
+    Ok(tokens)
 }
 
 /// What a picture costs: one and a half input tokens for each 32-pixel patch that covers it.

@@ -1,15 +1,4 @@
-pub mod liquid {
-    pub mod d1_2;
-    pub mod d1_2_ultra;
-}
-pub mod typesafe {
-    pub mod jev;
-}
-pub mod vllm {
-    pub mod d3_ultra;
-}
-
-use std::time::Duration;
+use std::{sync::LazyLock, time::Duration};
 
 use anyhow::{Context, Result, bail, ensure};
 use clap::ValueEnum;
@@ -17,15 +6,28 @@ use reqwest::{Url, blocking::Client, blocking::RequestBuilder};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use super::{PhotoQuestion, Profile};
+use super::{Model, PhotoQuestion, Profile, Service};
 use crate::providers::configured_env;
 
 pub const ACTION: &str = "hypercaptcha_trial";
 const TEST_SITE: &str = "6LeIxAcTAAAAAJcZVRqyHh71UMIEGNQ_MXjiZKhI";
 const TEST_SECRET: &str = "6LeIxAcTAAAAAGG-vFI1TnRWxMZNFuojJ4WifJWe";
 
+static MODELS: LazyLock<Vec<Model>> = LazyLock::new(|| {
+    [
+        include_str!("../../../models/recaptcha/vllm/d3-ultra.toml"),
+        include_str!("../../../models/recaptcha/typesafe/jev.toml"),
+        include_str!("../../../models/recaptcha/liquid/d1.2.toml"),
+        include_str!("../../../models/recaptcha/liquid/d1.2-ultra.toml"),
+    ]
+    .into_iter()
+    .map(|raw| Model::from_embedded_toml(raw, Service::Recaptcha).expect("valid built-in config"))
+    .collect()
+});
+
 /// What holds for Google's image grids whichever model answers them.
 pub static PROFILE: Profile = Profile {
+    service: Service::Recaptcha,
     layouts: &[3, 4],
     target: challenge_target,
     allows_skipping,
@@ -34,12 +36,7 @@ pub static PROFILE: Profile = Profile {
         task: "Does PHOTO contain at least one visible object of the type specified in `target`? Count a recognizable partial or distant object. The answer depends only on the contents of PHOTO. Other photo tiles are unrelated.",
     },
     average_cutoff_3x3: 0.6,
-    models: &[
-        &vllm::d3_ultra::MODEL,
-        &typesafe::jev::MODEL,
-        &liquid::d1_2::MODEL,
-        &liquid::d1_2_ultra::MODEL,
-    ],
+    models: &MODELS,
 };
 
 /// The object named on the second line of "Select all images with" or "Select all squares

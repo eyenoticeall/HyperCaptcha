@@ -3,6 +3,7 @@ use std::{
     env,
     io::{Cursor, Write},
     ops::Range,
+    path::PathBuf,
     sync::{
         Arc, Mutex, OnceLock,
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -24,7 +25,7 @@ use tiny_skia::{FilterQuality, IntRect, Pixmap, PixmapPaint, Transform};
 
 use crate::{
     boxes,
-    captcha::{Model, PhotoQuestion, Profile, Tuned},
+    captcha::{Model, ModelConfig, PhotoQuestion, Profile, Tuned, WireDialect, WireProfile},
     liquid,
     plan::{BoxAsk, BoxRule, Effort, GapRule, Plan},
 };
@@ -62,6 +63,11 @@ pub struct ProviderOptions {
     #[arg(long)]
     model: Option<String>,
 
+    /// Path to a TOML model config file (`schema_version = 1`), setting provider, model ID,
+    /// endpoint capabilities, and optional fitted tuning parameters.
+    #[arg(long)]
+    model_config: Option<PathBuf>,
+
     /// API root, including the version prefix. Overrides the provider's base URL.
     #[arg(long)]
     base_url: Option<String>,
@@ -78,23 +84,23 @@ pub struct ProviderOptions {
     #[arg(long, value_parser = crate::parse_probability)]
     tile_threshold: Option<f64>,
 
-    /// vLLM whole-grid weight on 3 × 3 grids. The remainder goes to the crop scores.
-    #[arg(long, value_parser = crate::parse_probability)]
-    vllm_whole_grid_weight_3x3: Option<f64>,
+    /// Whole-grid weight on 3 × 3 grids for two-view decision providers. The remainder goes to the crop scores.
+    #[arg(long, visible_alias = "vllm-whole-grid-weight-3x3", value_parser = crate::parse_probability)]
+    whole_grid_weight_3x3: Option<f64>,
 
-    /// vLLM whole-grid weight on 4 × 4 grids. The remainder goes to the crop scores.
-    #[arg(long, value_parser = crate::parse_probability)]
-    vllm_whole_grid_weight_4x4: Option<f64>,
+    /// Whole-grid weight on 4 × 4 grids for two-view decision providers. The remainder goes to the crop scores.
+    #[arg(long, visible_alias = "vllm-whole-grid-weight-4x4", value_parser = crate::parse_probability)]
+    whole_grid_weight_4x4: Option<f64>,
 
-    /// How vLLM combines whole-grid and crop scores for each tile. Defaults to logistic, or average when a whole-grid weight is set.
-    #[arg(long, value_enum)]
-    vllm_decision: Option<VllmDecision>,
+    /// How a two-view decision provider combines whole-grid and crop scores for each tile. Defaults to the model config's rule, or average when a whole-grid weight is set.
+    #[arg(long, visible_alias = "vllm-decision", value_enum)]
+    decision_rule: Option<VllmDecision>,
 
     /// Image input strategy for Jev checkbox challenges.
     #[arg(long, value_enum)]
     jev_vision: Option<JevVision>,
 
-    /// Image format sent to a decision provider. Jev defaults to PNG and vLLM to JPEG.
+    /// Image format sent to a decision provider. Defaults to the endpoint's configured format (PNG for Jev, JPEG for vLLM/Liquid).
     #[arg(long, value_enum)]
     decision_image_format: Option<DecisionImageFormat>,
 
@@ -110,25 +116,25 @@ pub struct ProviderOptions {
     #[arg(long, value_parser = clap::value_parser!(u32).range(280..=1568))]
     grid_max_side_4x4: Option<u32>,
 
-    /// How much vLLM asks about a 4 × 4 grid. Each level sends more requests than the one below it and costs more tokens: low sends the whole grid, one close-up pass and the skip question; medium adds boxes drawn on the whole grid; high adds a second close-up pass; max adds a box drawn around every square. Each level decides with the settings measured for it. Defaults to max. Applies to the logistic decision rule.
+    /// How much a two-view decision provider asks about a 4 × 4 grid. Each level sends more requests than the one below it and costs more tokens: low sends the whole grid, one close-up pass and the skip question; medium adds boxes drawn on the whole grid; high adds a second close-up pass; max adds a box drawn around every square. Each level decides with the settings measured for it. Defaults to max. Applies to the logistic decision rule.
     #[arg(long, value_enum)]
     effort: Option<Effort>,
 
     /// Wait for every box reply in a 4 × 4 round and log every box, instead of answering as soon as the selection is settled. For checking the box rule, at an effort level that has one.
-    #[arg(long)]
-    vllm_box_wait: bool,
+    #[arg(long, visible_alias = "vllm-box-wait")]
+    box_wait: bool,
 
-    /// The most close-ups vLLM puts in one request, from 2 to 9. Defaults to 4. Smaller groups mean more parallel requests with the same scores, but a larger upload, and the provider refuses requests beyond 16 at once per key.
-    #[arg(long, value_parser = clap::value_parser!(u8).range(2..=9))]
-    vllm_close_ups_per_request: Option<u8>,
+    /// The most close-ups a two-view decision provider puts in one request, from 2 to 9. Defaults to 4. Smaller groups mean more parallel requests with the same scores, but a larger upload.
+    #[arg(long, visible_alias = "vllm-close-ups-per-request", value_parser = clap::value_parser!(u8).range(2..=9))]
+    close_ups_per_request: Option<u8>,
 
-    /// Do not open vLLM's connections ahead of a round or keep them open between rounds.
-    #[arg(long)]
-    vllm_cold_connections: bool,
+    /// Do not open connections ahead of a round or keep them open between rounds.
+    #[arg(long, visible_alias = "vllm-cold-connections")]
+    cold_connections: bool,
 
-    /// Ask a 4 × 4 round everything any effort level asks, wait for every reply and log it, and decide as a plain round does: both close-up passes, the skip question and both box requests, none of which changes the answer. For recording a model's answers so that settings can be measured for it.
-    #[arg(long)]
-    record_4x4: bool,
+    /// Ask a 4 × 4 round everything any effort level asks, wait for every reply and log it, and decide as a plain round does: both close-up passes, the skip question and every supported box request, none of which changes the answer. For recording a model's answers so that settings can be measured for it.
+    #[arg(long, visible_alias = "record-4x4")]
+    record: bool,
 }
 
 // d3-ultra's compute time grows with the close-ups in a request, and its scores are the same
@@ -143,7 +149,7 @@ const MOST_RETRY_AFTER: u64 = 10;
 const VLLM_CLOSE_UPS_PER_REQUEST: u8 = 4;
 const MAX_CLOSE_UPS_WITH_SCENE: u8 = 8;
 
-#[derive(Clone, Copy, PartialEq, Eq, Serialize, ValueEnum)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
 #[serde(rename_all = "kebab-case")]
 pub enum Provider {
     OpenaiChat,
@@ -151,23 +157,28 @@ pub enum Provider {
     Jev,
     Vllm,
     Liquid,
+    Custom,
 }
 
 impl Provider {
     pub fn is_decision(self) -> bool {
-        matches!(self, Self::Jev | Self::Vllm | Self::Liquid)
+        matches!(self, Self::Jev | Self::Vllm | Self::Liquid | Self::Custom)
     }
 
     /// Whether the provider's models are asked about every tile twice, on the whole grid and
     /// on close-ups, and so take the settings and flags of that way of asking.
     pub fn asks_twice(self) -> bool {
-        matches!(self, Self::Vllm | Self::Liquid)
+        matches!(self, Self::Vllm | Self::Liquid | Self::Custom)
     }
 
-    /// Whether the provider's models answer one question with a box around every instance.
-    /// vLLM refuses that question type.
-    pub fn draws_every_instance(self) -> bool {
-        self == Self::Liquid
+    /// Whether the provider accepts image grids (every provider except text-only completions).
+    pub fn supports_vision(self) -> bool {
+        self != Self::OpenaiCompletions
+    }
+
+    /// Whether the runner should verify image handling with `/vision-check` before submitting.
+    pub fn requires_vision_check(self) -> bool {
+        self.is_decision()
     }
 
     /// The provider as it is written in a model's name: "vLLM/d3-ultra".
@@ -177,12 +188,13 @@ impl Provider {
             Self::Jev => "typesafe",
             Self::Vllm => "vLLM",
             Self::Liquid => "Liquid",
+            Self::Custom => "Custom",
         }
     }
 }
 
-/// Rules for combining d3-ultra's whole-grid and crop answers.
-#[derive(Clone, Copy, PartialEq, Eq, Serialize, ValueEnum)]
+/// Rules for combining whole-grid and crop answers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
 #[serde(rename_all = "kebab-case")]
 pub enum VllmDecision {
     /// Weighted average of the two probabilities.
@@ -191,7 +203,7 @@ pub enum VllmDecision {
     Logistic,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Serialize, ValueEnum)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
 #[serde(rename_all = "kebab-case")]
 pub enum JevVision {
     WholeGrid,
@@ -207,16 +219,19 @@ pub struct Backend {
     pub model: String,
     /// The model's name with its provider: "vLLM/d3-ultra".
     pub name: String,
+    /// Resolved wire/dialect profile for decision endpoints. `None` for OpenAI providers.
+    wire: Option<WireProfile>,
     pub jev_vision: Option<JevVision>,
     decision_image_format: DecisionImageFormat,
     jev_split_crops: bool,
     grid_max_side: [Option<u32>; 2],
-    /// What was measured with this model on the service's grids. vLLM only.
-    tuned: Option<&'static Tuned>,
+    /// What was measured with this model on the service's grids.
+    tuned: Option<Tuned>,
     /// The effort level of a 4 × 4 round, where the model has levels and the logistic rule decides.
     pub effort: Option<Effort>,
     /// How a 4 × 4 round is asked and decided.
     plan: Plan,
+    record: bool,
     vllm_close_ups_per_request: Option<u8>,
     vllm_box_wait: bool,
     warm: Option<Arc<Warm>>,
@@ -225,8 +240,8 @@ pub struct Backend {
     pub vllm_decision: Option<VllmDecision>,
     client: Client,
     url: Url,
-    /// One key, or several for vLLM. Requests take them in turn, because the provider
-    /// limits how many requests each key may have in flight.
+    /// One key, or several for rotation. Requests take them in turn, because some providers
+    /// limit how many requests each key may have in flight.
     keys: Arc<Vec<String>>,
     next_key: AtomicUsize,
     max_output_tokens: u32,
@@ -276,59 +291,89 @@ pub struct Reply {
 
 impl Backend {
     pub fn new(mut options: ProviderOptions, profile: &'static Profile) -> Result<Option<Self>> {
-        // A model's name says who serves it, so it can stand in for --provider.
-        let named = options
-            .model
+        let loaded_config = options
+            .model_config
             .as_deref()
-            .and_then(|name| profile.named(name));
-        if let (Some(named), Some(provider)) = (named, options.provider) {
-            ensure!(
-                named.provider == provider,
-                "{} is not served by the --provider given",
-                named.name
-            );
-        }
-        options.provider = options.provider.or(named.map(|named| named.provider));
+            .map(|path| -> Result<Model> {
+                let config = ModelConfig::from_path(path)?;
+                ensure!(
+                    config.service == profile.service,
+                    "model config {} is for --captcha {}, not --captcha {}",
+                    path.display(),
+                    config.service.as_str(),
+                    profile.service.as_str()
+                );
+                config.into_model()
+            })
+            .transpose()?;
+
+        let named = if let Some(cfg) = &loaded_config {
+            if let Some(provider) = options.provider {
+                ensure!(
+                    cfg.provider == provider,
+                    "{} is not served by the --provider given",
+                    cfg.name
+                );
+            }
+            options.provider = Some(cfg.provider);
+            None
+        } else {
+            // A model's name says who serves it, so it can stand in for --provider.
+            let named = options
+                .model
+                .as_deref()
+                .and_then(|name| profile.named(name));
+            if let (Some(named), Some(provider)) = (named, options.provider) {
+                ensure!(
+                    named.provider == provider,
+                    "{} is not served by the --provider given",
+                    named.name
+                );
+            }
+            options.provider = options.provider.or(named.map(|named| named.provider));
+            named
+        };
+
         ensure!(
             options.provider.is_some_and(Provider::asks_twice)
-                || (options.vllm_whole_grid_weight_3x3.is_none()
-                    && options.vllm_whole_grid_weight_4x4.is_none()),
-            "--vllm-whole-grid-weight-3x3 and --vllm-whole-grid-weight-4x4 require --provider vllm or liquid"
+                || (options.whole_grid_weight_3x3.is_none()
+                    && options.whole_grid_weight_4x4.is_none()),
+            "--whole-grid-weight-3x3 and --whole-grid-weight-4x4 require --provider vllm, liquid, or custom"
         );
         ensure!(
-            options.vllm_decision.is_none() || options.provider.is_some_and(Provider::asks_twice),
-            "--vllm-decision requires --provider vllm"
+            options.decision_rule.is_none() || options.provider.is_some_and(Provider::asks_twice),
+            "--decision-rule / --vllm-decision requires --provider vllm, liquid, or custom"
         );
         ensure!(
-            options.vllm_decision != Some(VllmDecision::Logistic)
-                || (options.vllm_whole_grid_weight_3x3.is_none()
-                    && options.vllm_whole_grid_weight_4x4.is_none()),
-            "--vllm-whole-grid-weight-* apply to --vllm-decision average"
+            options.decision_rule != Some(VllmDecision::Logistic)
+                || (options.whole_grid_weight_3x3.is_none()
+                    && options.whole_grid_weight_4x4.is_none()),
+            "--whole-grid-weight-* apply to --decision-rule average"
         );
         ensure!(
             options.effort.is_none() || options.provider.is_some_and(Provider::asks_twice),
-            "--effort requires --provider vllm or liquid"
+            "--effort requires --provider vllm, liquid, or custom"
         );
         ensure!(
-            !options.vllm_box_wait || options.provider.is_some_and(Provider::asks_twice),
-            "--vllm-box-wait requires --provider vllm or liquid"
+            !options.box_wait || options.provider.is_some_and(Provider::asks_twice),
+            "--box-wait / --vllm-box-wait requires --provider vllm, liquid, or custom"
         );
         ensure!(
-            options.vllm_close_ups_per_request.is_none()
+            options.close_ups_per_request.is_none()
                 || options.provider.is_some_and(Provider::asks_twice),
-            "--vllm-close-ups-per-request requires --provider vllm or liquid"
+            "--close-ups-per-request requires --provider vllm, liquid, or custom"
         );
         ensure!(
-            !options.record_4x4 || options.provider.is_some_and(Provider::asks_twice),
-            "--record-4x4 requires --provider vllm or liquid"
+            !options.record || options.provider.is_some_and(Provider::is_decision),
+            "--record / --record-4x4 requires a decision provider"
         );
         ensure!(
-            !options.record_4x4 || options.effort.is_none(),
-            "--record-4x4 asks everything an effort level asks, so it takes no --effort"
+            !options.record || options.effort.is_none(),
+            "--record / --record-4x4 asks everything an effort level asks, so it takes no --effort"
         );
         ensure!(
-            !options.vllm_cold_connections || options.provider.is_some_and(Provider::asks_twice),
-            "--vllm-cold-connections requires --provider vllm or liquid"
+            !options.cold_connections || options.provider.is_some_and(Provider::asks_twice),
+            "--cold-connections / --vllm-cold-connections requires --provider vllm, liquid, or custom"
         );
         ensure!(
             options.jev_vision.is_none() || options.provider == Some(Provider::Jev),
@@ -337,103 +382,135 @@ impl Backend {
         ensure!(
             options.decision_image_format.is_none()
                 || options.provider.is_some_and(Provider::is_decision),
-            "--decision-image-format requires --provider jev or vllm"
+            "--decision-image-format requires a decision provider"
         );
         ensure!(
-            !options.jev_split_crops || options.jev_vision == Some(JevVision::Average),
+            !options.jev_split_crops
+                || options.jev_vision == Some(JevVision::Average)
+                || (options.provider == Some(Provider::Jev) && options.record),
             "--jev-split-crops requires --jev-vision average"
         );
+        if options.provider == Some(Provider::Jev) && options.record {
+            ensure!(
+                matches!(options.jev_vision, None | Some(JevVision::Average)),
+                "--record with --provider jev requires --jev-vision average (or omitting --jev-vision)"
+            );
+        }
+
         let Some(provider) = options.provider else {
             ensure!(
                 options.model.is_none() && options.base_url.is_none(),
-                "--model and --base-url require --provider, or a model named with its provider such as {}",
+                "--model and --base-url require --provider, --model-config, or a model named with its provider such as {}",
                 profile
-                    .models
+                    .models()
                     .first()
-                    .map_or("vLLM/d3-ultra", |model| model.name)
+                    .map_or("vLLM/d3-ultra", |model| model.name.as_str())
             );
             return Ok(None);
         };
         ensure!(
-            profile.layouts.contains(&4) || provider.asks_twice(),
-            "This CAPTCHA service's grids are answered with --provider vllm"
+            provider != Provider::Custom || loaded_config.is_some(),
+            "--provider custom requires --model-config <path> with an [endpoint] section"
+        );
+        ensure!(
+            profile.layouts.contains(&4)
+                || provider.asks_twice()
+                || (provider == Provider::Jev
+                    && (options.jev_vision == Some(JevVision::Average)
+                        || options.record
+                        || loaded_config.is_some())),
+            "This CAPTCHA service's grids require a decision provider (--provider vllm, liquid, custom, or jev with --jev-vision average)"
         );
 
-        let (default_url, env_url, endpoint, key_names) = match provider {
-            Provider::OpenaiChat => (
-                "https://api.openai.com/v1",
-                "OPENAI_BASE_URL",
-                "chat/completions",
-                &["OPENAI_API_KEY"][..],
-            ),
-            Provider::OpenaiCompletions => (
-                "https://api.openai.com/v1",
-                "OPENAI_BASE_URL",
-                "completions",
-                &["OPENAI_API_KEY"][..],
-            ),
-            Provider::Jev => (
-                "https://api.typesafe.ai/v1",
-                "JEV_BASE_URL",
-                "systemone",
-                &["TYPESAFE_API_KEY", "JEV_API_KEY"][..],
-            ),
-            Provider::Vllm => (
-                "https://app.vllm-sr.ai/v1",
-                "VLLM_SR_BASE_URL",
-                "systemone",
-                &["VLLM_SR_API_KEY"][..],
-            ),
-            Provider::Liquid => (
-                "https://api.liquid.ai/decisions/v1",
-                "LIQUID_BASE_URL",
-                "systemone",
-                &["LIQUID_API_KEY"][..],
-            ),
-        };
+        let is_external_config = loaded_config.is_some();
+        let (model, name, wire, tuned, base, url, keys) = if provider.is_decision() {
+            let (model, name, wire, tuned, explicit_base_url) = if let Some(cfg) = loaded_config {
+                let (model, name) = match options.model.filter(|model| !model.trim().is_empty()) {
+                    Some(cli_model)
+                        if !cli_model.eq_ignore_ascii_case(&cfg.name) && cli_model != cfg.id =>
+                    {
+                        let display = format!("{}/{cli_model}", provider.label());
+                        (cli_model, display)
+                    }
+                    _ => (cfg.id, cfg.name),
+                };
+                let explicit_base = cfg.has_explicit_base_url.then(|| cfg.wire.base_url.clone());
+                (model, name, cfg.wire, cfg.tuned, explicit_base)
+            } else {
+                let model = named
+                    .map(|named| named.id.clone())
+                    .or(options.model)
+                    .or_else(|| profile.of(provider).next().map(|first| first.id.clone()))
+                    .or_else(|| {
+                        (provider == Provider::Jev
+                            && (options.jev_vision == Some(JevVision::Average) || options.record))
+                            .then(|| "jev-latest".to_owned())
+                    })
+                    .filter(|model| !model.trim().is_empty())
+                    .with_context(|| {
+                        format!(
+                            "this CAPTCHA service has no settings for a {} model (pass --model with --record, --decision-rule average, or --model-config <path>)",
+                            provider.label()
+                        )
+                    })?;
+                let known = profile.model(provider, &model);
+                let name = known.map_or_else(
+                    || format!("{}/{model}", provider.label()),
+                    |known| known.name.clone(),
+                );
+                let wire = match known {
+                    Some(known) => known.wire.clone(),
+                    None => WireProfile::for_provider(provider)?,
+                };
+                let tuned = known.and_then(|known| known.tuned.clone());
+                (model, name, wire, tuned, None)
+            };
 
-        let model = named
-            .map(|named| named.id.to_owned())
-            .or(options.model)
-            .or_else(|| profile.of(provider).next().map(|first| first.id.to_owned()))
-            .filter(|model| !model.trim().is_empty())
-            .with_context(|| {
-                if provider.is_decision() {
-                    format!(
-                        "this CAPTCHA service has no settings for a {} model",
-                        provider.label()
-                    )
-                } else {
-                    "--model must be nonempty and is required for OpenAI providers".into()
-                }
-            })?;
-        let known: Option<&'static Model> = profile.model(provider, &model);
-        let name = known.map_or_else(
-            || format!("{}/{model}", provider.label()),
-            |known| known.name.to_owned(),
-        );
-        let base = options
-            .base_url
-            .or_else(|| configured_env(env_url))
-            .unwrap_or_else(|| default_url.into());
-        let url = endpoint_url(&base, endpoint)?;
-        let key = key_names
-            .iter()
-            .find_map(|name| configured_env(name))
-            .with_context(|| format!("set {}", key_names.join(" or ")))?;
-        let mut keys = vec![key];
-        if provider == Provider::Vllm {
-            for extra in configured_env("VLLM_SR_EXTRA_API_KEYS")
-                .unwrap_or_default()
-                .split(',')
-                .map(str::trim)
-                .filter(|extra| !extra.is_empty())
-            {
-                if !keys.iter().any(|known| known == extra) {
-                    keys.push(extra.to_owned());
+            let base = options
+                .base_url
+                .or(explicit_base_url)
+                .or_else(|| wire.base_url_env.as_deref().and_then(configured_env))
+                .unwrap_or_else(|| wire.base_url.clone());
+            let url = endpoint_url(&base, "systemone")?;
+            let key = wire
+                .api_key_envs
+                .iter()
+                .find_map(|env_name| configured_env(env_name))
+                .with_context(|| format!("set {}", wire.api_key_envs.join(" or ")))?;
+            let mut keys = vec![key];
+            if let Some(extra_env) = &wire.extra_api_keys_env {
+                for extra in configured_env(extra_env)
+                    .unwrap_or_default()
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|extra| !extra.is_empty())
+                {
+                    if !keys.iter().any(|known| known == extra) {
+                        keys.push(extra.to_owned());
+                    }
                 }
             }
-        }
+            (model, name, Some(wire), tuned, base, url, keys)
+        } else {
+            let endpoint = match provider {
+                Provider::OpenaiChat => "chat/completions",
+                Provider::OpenaiCompletions => "completions",
+                _ => unreachable!(),
+            };
+            let model = options
+                .model
+                .filter(|model| !model.trim().is_empty())
+                .context("--model must be nonempty and is required for OpenAI providers")?;
+            let name = format!("{}/{model}", provider.label());
+            let base = options
+                .base_url
+                .or_else(|| configured_env("OPENAI_BASE_URL"))
+                .unwrap_or_else(|| "https://api.openai.com/v1".into());
+            let url = endpoint_url(&base, endpoint)?;
+            let key = configured_env("OPENAI_API_KEY").context("set OPENAI_API_KEY")?;
+            (model, name, None, None, base, url, vec![key])
+        };
+
         let build_client = |most_idle: Option<usize>| {
             let builder = Client::builder()
                 .user_agent(concat!("HyperCaptcha/", env!("CARGO_PKG_VERSION")))
@@ -452,89 +529,122 @@ impl Backend {
             .build()
         };
         let client = build_client(None)?;
-        // Settings are measured model by model, so a vLLM model without a file of its own has
-        // none to run with.
-        let tuned = provider
-            .asks_twice()
-            .then(|| {
-                known.and_then(|known| known.tuned).with_context(|| {
-                    let measured: Vec<_> = profile
-                        .of(provider)
-                        .filter(|model| model.tuned.is_some())
-                        .map(|model| model.name)
-                        .collect();
-                    format!(
-                        "this CAPTCHA service has no settings measured with {name}; it has them for {}",
-                        measured.join(", ")
-                    )
-                })
-            })
-            .transpose()?;
-        let vllm_decision = tuned.map(|tuned| {
-            options.vllm_decision.unwrap_or(
-                if options.vllm_whole_grid_weight_3x3.is_some()
-                    || options.vllm_whole_grid_weight_4x4.is_some()
+
+        // Settings are measured model by model. An unmeasured model is refused unless the user
+        // explicitly opts into recording, averaging, or supplies `--model-config`.
+        let explicitly_unmeasured_ok = options.record
+            || options.decision_rule == Some(VllmDecision::Average)
+            || options.whole_grid_weight_3x3.is_some()
+            || options.whole_grid_weight_4x4.is_some()
+            || is_external_config;
+        if provider.asks_twice() && tuned.is_none() && !explicitly_unmeasured_ok {
+            let measured: Vec<_> = profile
+                .of(provider)
+                .filter(|model| model.tuned.is_some())
+                .map(|model| model.name.as_str())
+                .collect();
+            if measured.is_empty() {
+                bail!(
+                    "this CAPTCHA service has no settings measured with {name}; pass --record, --decision-rule average, or --model-config <path> to run an unmeasured model"
+                );
+            }
+            bail!(
+                "this CAPTCHA service has no settings measured with {name}; it has them for {}. Pass --record, --decision-rule average, or --model-config <path> to run an unmeasured model.",
+                measured.join(", ")
+            );
+        }
+
+        let vllm_decision = provider.asks_twice().then(|| {
+            options.decision_rule.unwrap_or_else(|| {
+                if options.whole_grid_weight_3x3.is_some()
+                    || options.whole_grid_weight_4x4.is_some()
                 {
                     VllmDecision::Average
+                } else if let Some(tuned) = &tuned {
+                    tuned.default_decision
                 } else {
-                    tuned.vllm_decision
-                },
-            )
+                    VllmDecision::Average
+                }
+            })
         });
+        let supports_every_box = wire.as_ref().is_some_and(|w| w.supports_every_box);
         // The effort levels were measured on the logistic rule's scores. Averaged scores keep
         // one plan, and a provider with nothing measured sends a plain round.
-        let (effort, plan) = match (tuned, vllm_decision) {
-            _ if options.record_4x4 => (None, Plan::record(provider.draws_every_instance())),
-            (Some(tuned), Some(VllmDecision::Logistic)) => match &tuned.efforts {
-                Some(efforts) => {
-                    let effort = options.effort.unwrap_or_default();
-                    (Some(effort), efforts.plan(effort))
+        let (effort, plan) = if options.record {
+            (None, Plan::record(supports_every_box))
+        } else {
+            match (&tuned, vllm_decision) {
+                (Some(tuned), Some(VllmDecision::Logistic)) => match &tuned.efforts {
+                    Some(efforts) => {
+                        let effort = options.effort.unwrap_or_default();
+                        (Some(effort), efforts.plan(effort).clone())
+                    }
+                    None => {
+                        ensure!(
+                            options.effort.is_none(),
+                            "no effort levels have been measured with {name} on this CAPTCHA service"
+                        );
+                        (None, Plan::plain())
+                    }
+                },
+                (Some(tuned), _) => {
+                    ensure!(
+                        options.effort.is_none(),
+                        "--effort applies to --vllm-decision logistic (or --decision-rule logistic)"
+                    );
+                    (None, tuned.average_4x4.clone())
                 }
-                None => {
+                (None, Some(VllmDecision::Logistic)) => {
                     ensure!(
                         options.effort.is_none(),
                         "no effort levels have been measured with {name} on this CAPTCHA service"
                     );
-                    (None, Plan::PLAIN)
+                    (None, Plan::plain())
                 }
-            },
-            (Some(tuned), _) => {
-                ensure!(
-                    options.effort.is_none(),
-                    "--effort applies to --vllm-decision logistic"
-                );
-                (None, tuned.average_4x4)
+                (None, _) => {
+                    ensure!(
+                        options.effort.is_none(),
+                        "--effort applies to --vllm-decision logistic (or --decision-rule logistic)"
+                    );
+                    (None, Plan::plain())
+                }
             }
-            (None, _) => (None, Plan::PLAIN),
         };
+
+        let decision_image_format = options.decision_image_format.unwrap_or_else(|| {
+            wire.as_ref()
+                .map_or(DecisionImageFormat::Png, |w| w.image_format)
+        });
+        let jev_vision = (provider == Provider::Jev).then(|| {
+            options.jev_vision.unwrap_or(if options.record {
+                JevVision::Average
+            } else {
+                JevVision::WholeGrid
+            })
+        });
 
         let mut backend = Self {
             profile,
             provider,
             model,
             name,
+            wire,
             tile_threshold_override: options.tile_threshold,
             vllm_whole_grid_weights: [
-                options.vllm_whole_grid_weight_3x3.unwrap_or(0.5),
-                options.vllm_whole_grid_weight_4x4.unwrap_or(0.5),
+                options.whole_grid_weight_3x3.unwrap_or(0.5),
+                options.whole_grid_weight_4x4.unwrap_or(0.5),
             ],
             vllm_decision,
-            jev_vision: (provider == Provider::Jev)
-                .then(|| options.jev_vision.unwrap_or(JevVision::WholeGrid)),
-            decision_image_format: options.decision_image_format.unwrap_or(
-                if provider.asks_twice() {
-                    DecisionImageFormat::Jpeg
-                } else {
-                    DecisionImageFormat::Png
-                },
-            ),
+            jev_vision,
+            decision_image_format,
             jev_split_crops: options.jev_split_crops,
             grid_max_side: [options.grid_max_side_3x3, options.grid_max_side_4x4],
             tuned,
             effort,
             plan,
-            vllm_close_ups_per_request: options.vllm_close_ups_per_request,
-            vllm_box_wait: options.vllm_box_wait || options.record_4x4,
+            record: options.record,
+            vllm_close_ups_per_request: options.close_ups_per_request,
+            vllm_box_wait: options.box_wait || options.record,
             client,
             url,
             keys: Arc::new(keys),
@@ -546,31 +656,41 @@ impl Backend {
         ensure!(
             backend.vllm_decision != Some(VllmDecision::Logistic)
                 || profile.layouts.iter().any(|&side| match side {
-                    4 => tuned.is_some_and(|tuned| tuned.logistic_4x4.is_some()),
-                    _ => tuned.is_some_and(|tuned| tuned.logistic_3x3.is_some()),
+                    4 => backend
+                        .tuned
+                        .as_ref()
+                        .is_some_and(|tuned| tuned.logistic_4x4.is_some()),
+                    _ => backend
+                        .tuned
+                        .as_ref()
+                        .is_some_and(|tuned| tuned.logistic_3x3.is_some()),
                 }),
-            "--vllm-decision logistic has not been fitted for this CAPTCHA service"
+            "--decision-rule / --vllm-decision logistic has not been fitted for this CAPTCHA service"
         );
         ensure!(
-            provider.draws_every_instance()
-                || backend.plan.boxes.is_none_or(|rule| rule.every.is_none()),
+            supports_every_box || backend.plan.boxes.is_none_or(|rule| rule.every.is_none()),
             "{} models do not answer the box question that asks for every instance",
             provider.label()
         );
         ensure!(
             !backend.vllm_box_wait || backend.plan.boxes.is_some(),
-            "--vllm-box-wait needs a box rule: --effort medium, high or max with the logistic decision"
+            "--box-wait / --vllm-box-wait needs a box rule: --effort medium, high or max with the logistic decision"
         );
-        if provider == Provider::Vllm {
+        if backend.wire.as_ref().is_some_and(|w| w.warm_connections) {
             // The busiest round is a 4 × 4 grid with the presence question and its box requests.
             let passes = backend.plan.close_ups.len();
-            let boxes = usize::from(backend.plan.boxes.map_or(0, |rule| rule.requests()));
+            let boxes = usize::from(
+                backend
+                    .plan
+                    .boxes
+                    .map_or(0, |rule| backend.box_request_count(rule)),
+            );
             let connections = 2 + boxes + passes * backend.close_up_batches(4).len();
             // A connection that has not yet carried an upload sends a round's request several
             // round trips slower. Idle connections beyond the warmed set are closed, so a
             // duplicate's new connection cannot displace them.
             backend.client = build_client(Some(connections))?;
-            if !options.vllm_cold_connections {
+            if !options.cold_connections {
                 let (wake, woken) = mpsc::channel();
                 let warm = Arc::new(Warm {
                     until: Mutex::new(None),
@@ -600,7 +720,7 @@ impl Backend {
         {
             return self.predict_decision_grid(input, threshold.expect("decision tile threshold"));
         }
-        let (body, contains_jev_image) = match self.provider {
+        let (body, has_images) = match self.provider {
             Provider::OpenaiChat => (
                 chat_request(&self.model, input, self.max_output_tokens)?,
                 false,
@@ -613,7 +733,7 @@ impl Backend {
                 }),
                 false,
             ),
-            Provider::Jev | Provider::Vllm | Provider::Liquid => (
+            Provider::Jev | Provider::Vllm | Provider::Liquid | Provider::Custom => (
                 jev_request(
                     &self.model,
                     input,
@@ -621,11 +741,11 @@ impl Backend {
                     self.decision_image_format,
                     self.profile,
                 )?,
-                self.provider == Provider::Jev && input.max_tile().is_some(),
+                input.max_tile().is_some(),
             ),
         };
 
-        let response = self.send(&body, contains_jev_image)?;
+        let response = self.send(&body, has_images)?;
         Ok(response.into_reply(self.provider, input, threshold))
     }
 
@@ -646,9 +766,10 @@ impl Backend {
         resized_png(&image, max_side)
     }
 
-    /// How vLLM asks and decides a 4 × 4 round.
-    pub fn plan_4x4(&self) -> Option<Plan> {
-        (self.provider.asks_twice() && self.profile.layouts.contains(&4)).then_some(self.plan)
+    /// How a 4 × 4 round is asked and decided.
+    pub fn plan_4x4(&self) -> Option<&Plan> {
+        ((self.provider.asks_twice() || self.record) && self.profile.layouts.contains(&4))
+            .then_some(&self.plan)
     }
 
     pub fn decision_image_format(&self) -> Option<DecisionImageFormat> {
@@ -657,7 +778,7 @@ impl Backend {
             .then_some(self.decision_image_format)
     }
 
-    /// The presence cutoff for this round, when vLLM asks whether the target appears at all.
+    /// The presence cutoff for this round, when the model asks whether the target appears at all.
     fn skip_below(&self, input: &Input) -> Option<f64> {
         let Input::Grid { layout, prompt, .. } = input else {
             return None;
@@ -688,13 +809,17 @@ impl Backend {
         }
     }
 
-    /// The requests a round's box rule sends. Liquid takes one state a request, so each of
-    /// its window pictures travels alone.
+    /// The requests a round's box rule sends. Endpoints without multi-state window support
+    /// send each of the sixteen window pictures alone.
     fn box_request_count(&self, rule: BoxRule) -> u8 {
+        let multi_state = self.wire.as_ref().is_none_or(|w| w.multi_state_windows);
         rule.asks()
-            .map(|ask| match (ask, self.provider) {
-                (BoxAsk::Windows, Provider::Liquid) => boxes::WINDOWS,
-                _ => 1,
+            .map(|ask| {
+                if ask == BoxAsk::Windows && !multi_state {
+                    boxes::WINDOWS
+                } else {
+                    1
+                }
             })
             .sum()
     }
@@ -715,22 +840,27 @@ impl Backend {
         } else {
             tiles
         };
-        // Only vLLM's 4 × 4 requests are held to the image limit: Jev sends all sixteen
-        // close-ups with the scene unless it is asked to split them.
-        let per_request = if layout == 4 && self.provider.asks_twice() {
-            per_request.min(if self.provider == Provider::Liquid {
-                // The scene takes one of a Liquid request's places.
-                liquid::MOST_IMAGES as u8 - 1
+        let max_per_batch = if self.provider.asks_twice() {
+            let max_images = self
+                .wire
+                .as_ref()
+                .map_or(usize::from(tiles), |w| w.max_images)
+                .min(usize::from(u8::MAX)) as u8;
+            if layout == 4 {
+                // Each 4 × 4 close-up request also carries the scene picture.
+                MAX_CLOSE_UPS_WITH_SCENE.min(max_images.saturating_sub(1).max(1))
             } else {
-                MAX_CLOSE_UPS_WITH_SCENE
-            })
+                max_images.max(1)
+            }
         } else {
-            per_request
+            tiles
         };
+        let per_request = per_request.min(max_per_batch);
         // Spread the tiles evenly over as few requests as that size allows. A request with a
-        // single close-up scores it slightly differently, so no request is left with one.
+        // single close-up scores it slightly differently, so no request is left with one when
+        // merging fits within the image limit.
         let mut requests = tiles.div_ceil(per_request);
-        if requests > 1 && tiles / requests < 2 {
+        if requests > 1 && tiles / requests < 2 && tiles.div_ceil(requests - 1) <= max_per_batch {
             requests -= 1;
         }
         let (size, larger) = (tiles / requests, tiles % requests);
@@ -787,9 +917,10 @@ impl Backend {
 
     /// The model's settings when the logistic rule decides grids of this size: it is the rule
     /// in use and has been fitted for them. A size it was not fitted for is averaged.
-    fn logistic_for(&self, layout: u8) -> Option<&'static Tuned> {
+    fn logistic_for(&self, layout: u8) -> Option<&Tuned> {
         let tuned = self
             .tuned
+            .as_ref()
             .filter(|_| self.vllm_decision == Some(VllmDecision::Logistic))?;
         match layout {
             4 => tuned.logistic_4x4.is_some(),
@@ -826,10 +957,9 @@ impl Backend {
         let target =
             (self.profile.target)(prompt, side).context("missing image challenge target")?;
         let encoding = self.decision_image_format;
-        let send_jev_image_header = self.provider == Provider::Jev;
         let scene = grid_asset(png, encoding)?;
         let whole_request = decision_whole_grid(&self.model, side, prompt, scene.clone());
-        // A 4 × 4 prompt that allows skipping may show none of the target. vLLM is then also
+        // A 4 × 4 prompt that allows skipping may show none of the target. The model is then also
         // asked, in a small request of its own, whether the target appears at all. Adding the
         // question to the whole-grid request would shift that request's square scores.
         let skip_below = self.skip_below(input);
@@ -847,7 +977,7 @@ impl Backend {
         let mut passes = Vec::new();
         let mut pass_pixels = Vec::new();
         if side != 3 {
-            for scale in self.plan.close_ups {
+            for scale in &self.plan.close_ups {
                 let (grid, asset) = match *scale {
                     None => (
                         Pixmap::decode_png(png).context("decode grid for tile crops")?,
@@ -867,13 +997,10 @@ impl Backend {
                 passes.push((grid, asset));
             }
         }
-        // vLLM gets smoothly enlarged squares: the same accuracy on human-labelled grids
-        // and about 18% smaller requests. Jev keeps the nearest-neighbour crops it was measured with.
-        let filter = if self.provider.asks_twice() {
-            FilterQuality::Bilinear
-        } else {
-            FilterQuality::Nearest
-        };
+        let filter = self
+            .wire
+            .as_ref()
+            .map_or(FilterQuality::Nearest, |w| w.crop_filter.filter_quality());
         let send_crops = |grid: &Pixmap, scene: &Value, tiles: Range<u8>| {
             let request = scene_and_crops(
                 &self.model,
@@ -885,8 +1012,7 @@ impl Backend {
                 scene.clone(),
                 filter,
             )?;
-            self.send(&request, send_jev_image_header)
-                .context("scene and crops")
+            self.send(&request, true).context("scene and crops")
         };
         // One list entry is one request.
         let batches = self.close_up_batches(side);
@@ -901,15 +1027,14 @@ impl Backend {
                 tiles,
                 &self.profile.photo,
             )?;
-            self.send(&request, send_jev_image_header)
-                .context("individual photos")
+            self.send(&request, true).context("individual photos")
         };
         let send_photos = &send_photos;
         let (whole, crops, presence) = thread::scope(|scope| -> Result<_> {
-            let whole = scope.spawn(|| self.send(&whole_request, send_jev_image_header));
+            let whole = scope.spawn(|| self.send(&whole_request, true));
             let presence = presence_request
                 .as_ref()
-                .map(|request| scope.spawn(|| self.send(request, send_jev_image_header)));
+                .map(|request| scope.spawn(|| self.send(request, true)));
             let crops = if side == 3 {
                 let workers: Vec<_> = batches
                     .iter()
@@ -1156,11 +1281,11 @@ impl Backend {
     ) -> mpsc::Receiver<(BoxAsk, Result<Value>)> {
         let (results, replies) = mpsc::channel();
         let png: Arc<[u8]> = Arc::from(png);
+        let one_state = self.wire.as_ref().is_some_and(|w| !w.multi_state_windows);
         for ask in rule.asks() {
-            let (wire, warm) = (self.empty_wire(false), self.warm.clone());
+            let (wire, warm) = (self.empty_wire(true), self.warm.clone());
             let (results, png) = (results.clone(), Arc::clone(&png));
             let (model, target) = (self.model.clone(), target.to_owned());
-            let one_state = self.provider == Provider::Liquid;
             thread::spawn(move || {
                 let reply =
                     Self::box_request(wire, warm.as_deref(), &model, &target, &png, ask, one_state);
@@ -1173,7 +1298,7 @@ impl Backend {
     pub fn check_decision_vision(&self) -> Result<VisionCheck> {
         ensure!(
             self.provider.is_decision(),
-            "the vision check requires Jev or vLLM"
+            "the vision check requires a decision provider"
         );
         if let Some(check) = self.verified_vision.get() {
             return Ok(check.clone());
@@ -1204,7 +1329,7 @@ impl Backend {
             );
             let start = Instant::now();
             let response = self
-                .send(&request, self.provider == Provider::Jev)
+                .send(&request, true)
                 .context("vision control request failed")?;
             controls.push(VisionControl {
                 expected_red,
@@ -1238,14 +1363,14 @@ impl Backend {
         Ok(check)
     }
 
-    fn send(&self, body: &impl Serialize, contains_jev_image: bool) -> Result<ApiResponse> {
-        if self.provider == Provider::Vllm {
-            return self.send_vllm(body);
+    fn send(&self, body: &impl Serialize, has_images: bool) -> Result<ApiResponse> {
+        if self.wire.as_ref().is_some_and(|w| w.return_meta) {
+            return self.send_with_meta(body, has_images);
         }
-        self.send_request(body, contains_jev_image)
+        self.send_request(body, has_images)
     }
 
-    fn send_vllm(&self, body: &impl Serialize) -> Result<ApiResponse> {
+    fn send_with_meta(&self, body: &impl Serialize, has_images: bool) -> Result<ApiResponse> {
         #[derive(Serialize)]
         struct WithMeta<'a, T> {
             #[serde(flatten)]
@@ -1257,7 +1382,7 @@ impl Backend {
                 request: body,
                 options: json!({"return_meta": true}),
             },
-            false,
+            has_images,
         )
     }
 
@@ -1274,65 +1399,84 @@ impl Backend {
                 (state >> 24) as u8
             })
             .collect();
-        #[derive(Serialize)]
-        struct WithMeta {
-            #[serde(flatten)]
-            request: Value,
-            options: Value,
+        let request = decision_image_request(
+            &self.model,
+            inline_jpeg(&rgb, side, side)?,
+            json!({"red": {
+                "type": "noul",
+                "instructions": "Is the image in `grid` predominantly red?",
+            }}),
+        );
+        if self.wire.as_ref().is_some_and(|w| w.return_meta) {
+            #[derive(Serialize)]
+            struct WithMeta {
+                #[serde(flatten)]
+                request: Value,
+                options: Value,
+            }
+            self.wire(
+                &WithMeta {
+                    request,
+                    options: json!({"return_meta": true}),
+                },
+                true,
+            )
+        } else {
+            self.wire(&request, true)
         }
-        self.wire(
-            &WithMeta {
-                request: decision_image_request(
-                    &self.model,
-                    inline_jpeg(&rgb, side, side)?,
-                    json!({"red": {
-                        "type": "noul",
-                        "instructions": "Is the image in `grid` predominantly red?",
-                    }}),
-                ),
-                options: json!({"return_meta": true}),
-            },
-            false,
-        )
     }
 
-    fn wire(&self, body: &impl Serialize, contains_jev_image: bool) -> Result<Wire> {
-        let mut wire = self.empty_wire(contains_jev_image);
-        let json = if self.provider == Provider::Liquid {
-            let named = serde_json::to_value(body).context("encode decision request")?;
-            let (listed, tokens) = liquid::request(named)?;
-            wire.least_tokens = tokens;
-            serde_json::to_vec(&listed)
-        } else {
-            serde_json::to_vec(body)
+    fn wire(&self, body: &impl Serialize, has_images: bool) -> Result<Wire> {
+        let mut wire = self.empty_wire(has_images);
+        let json = match self.wire.as_ref() {
+            Some(profile) if profile.dialect == WireDialect::SystemOneImages => {
+                let named = serde_json::to_value(body).context("encode decision request")?;
+                let (listed, tokens) = liquid::request_with_limit(named, profile.max_images)?;
+                if profile.min_patch_tokens {
+                    wire.least_tokens = tokens;
+                }
+                serde_json::to_vec(&listed)
+            }
+            Some(profile) if profile.min_patch_tokens => {
+                let named = serde_json::to_value(body).context("encode decision request")?;
+                wire.least_tokens = liquid::assets_min_tokens(&named)?;
+                serde_json::to_vec(&named)
+            }
+            _ => serde_json::to_vec(body),
         }
         .context("encode decision request")?;
         wire.carrying(json)
     }
 
     /// A request that has its key and still needs its body.
-    fn empty_wire(&self, contains_jev_image: bool) -> Wire {
-        let vllm = self.provider == Provider::Vllm;
+    fn empty_wire(&self, has_images: bool) -> Wire {
+        let profile = self.wire.as_ref();
+        let extra_headers = match profile {
+            Some(profile)
+                if !profile.extra_headers.is_empty()
+                    && (has_images || self.provider != Provider::Jev) =>
+            {
+                Arc::new(profile.extra_headers.clone())
+            }
+            _ => Arc::new(BTreeMap::new()),
+        };
         Wire {
             client: self.client.clone(),
             url: self.url.clone(),
             keys: Arc::clone(&self.keys),
             first_key: self.next_key.fetch_add(1, Ordering::Relaxed),
             body: Arc::new(Vec::new()),
-            gzip: vllm,
-            jev_image_header: contains_jev_image,
-            names_errors: self.provider.asks_twice(),
-            // d3-ultra answers the same request the same way, so a duplicate of a slow request
-            // costs only tokens. Liquid does not, and counts every request against one limit
-            // for the organisation.
-            hedge: vllm,
+            gzip: profile.is_some_and(|w| w.gzip),
+            extra_headers,
+            names_errors: profile.is_some_and(|w| w.names_errors),
+            hedge: profile.is_some_and(|w| w.hedge_on_stall),
             least_tokens: 0,
             timeout: None,
         }
     }
 
-    fn send_request(&self, body: &impl Serialize, contains_jev_image: bool) -> Result<ApiResponse> {
-        let wire = self.wire(body, contains_jev_image)?;
+    fn send_request(&self, body: &impl Serialize, has_images: bool) -> Result<ApiResponse> {
+        let wire = self.wire(body, has_images)?;
         if let Some(warm) = &self.warm {
             warm.wait_for_keeper();
         }
@@ -1409,7 +1553,7 @@ struct Wire {
     first_key: usize,
     body: Arc<Vec<u8>>,
     gzip: bool,
-    jev_image_header: bool,
+    extra_headers: Arc<BTreeMap<String, String>>,
     /// Whether a refusal's error code is read into the message.
     names_errors: bool,
     /// Whether a request with no reply yet is sent again at the times in `HEDGE_AT`.
@@ -1468,8 +1612,8 @@ impl Wire {
         if self.gzip {
             request = request.header("Content-Encoding", "gzip");
         }
-        if self.jev_image_header {
-            request = request.header("TypeSafe-Danger-Zone-Images", "true");
+        for (name, value) in self.extra_headers.as_ref() {
+            request = request.header(name.as_str(), value.as_str());
         }
         if let Some(timeout) = self.timeout {
             request = request.timeout(timeout);
@@ -1728,6 +1872,11 @@ impl Keeper {
 
 pub fn configured_env(name: &str) -> Option<String> {
     env::var(name).ok().filter(|value| !value.trim().is_empty())
+}
+
+pub fn validate_base_url(base: &str) -> Result<()> {
+    let _ = endpoint_url(base, "systemone")?;
+    Ok(())
 }
 
 fn endpoint_url(base: &str, path: &str) -> Result<Url> {
@@ -2064,7 +2213,7 @@ fn inline_png(png: &[u8]) -> Value {
     json!({"type": "image", "format": "png", "data_base64": STANDARD.encode(png)})
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Serialize, ValueEnum)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
 #[serde(rename_all = "kebab-case")]
 pub enum DecisionImageFormat {
     Png,
@@ -2248,11 +2397,11 @@ fn apply_box_rule(
 }
 
 #[derive(Clone, Copy)]
-enum Combine {
+enum Combine<'a> {
     /// Whole-grid weight; the crop view gets the remainder.
     Average(f64),
     /// The logistic rules fitted for one model on a CAPTCHA service.
-    Logistic(&'static Tuned),
+    Logistic(&'a Tuned),
 }
 
 fn log_odds(probability: f64) -> f64 {
@@ -2280,7 +2429,13 @@ fn logistic_scores(
 ) -> Result<BTreeMap<u8, f64>, String> {
     let unfitted = || format!("no logistic rule is fitted for {side} × {side} grids");
     let rule_4x4 = (side == 4)
-        .then(|| tuned.logistic_4x4.as_ref().ok_or_else(unfitted))
+        .then(|| {
+            tuned
+                .logistic_4x4
+                .as_ref()
+                .map(|rule| &rule.weights)
+                .ok_or_else(unfitted)
+        })
         .transpose()?;
     let rule_3x3 = (side != 4)
         .then(|| tuned.logistic_3x3.as_ref().ok_or_else(unfitted))
@@ -2310,7 +2465,7 @@ fn blend_decision_replies(
     variant_name: &str,
     side: u8,
     threshold: f64,
-    combine: Combine,
+    combine: Combine<'_>,
 ) -> Reply {
     let max_tile = side * side;
     let whole_scores = jev_grid_scores(whole.answers.as_ref(), max_tile)
@@ -2544,7 +2699,14 @@ fn parse_openai(choices: Option<Vec<OpenAiChoice>>, provider: Provider, input: &
 mod tests {
     use super::*;
 
-    const RECAPTCHA: &Tuned = &crate::captcha::recaptcha::vllm::d3_ultra::TUNED;
+    fn recaptcha_tuned(name: &str) -> &'static Tuned {
+        crate::captcha::recaptcha::PROFILE
+            .named(name)
+            .unwrap()
+            .tuned
+            .as_ref()
+            .unwrap()
+    }
 
     fn tiles(values: &[f64]) -> BTreeMap<u8, f64> {
         (1..).zip(values.iter().copied()).collect()
@@ -2560,6 +2722,7 @@ mod tests {
     // Reference values computed independently in Python from logged d3-ultra answers.
     #[test]
     fn logistic_rule_matches_the_fitted_reference_on_3x3() {
+        let recaptcha = recaptcha_tuned("vLLM/d3-ultra");
         let whole = tiles(&[
             0.910962,
             0.0212042,
@@ -2582,7 +2745,7 @@ mod tests {
             0.00289398,
             0.000319073,
         ]);
-        let scores = logistic_scores(&whole, &photos, 3, RECAPTCHA).unwrap();
+        let scores = logistic_scores(&whole, &photos, 3, recaptcha).unwrap();
         assert_close(
             &scores,
             &[
@@ -2598,7 +2761,7 @@ mod tests {
             ],
         );
         let Output::Prediction(Prediction::Tiles(picks)) =
-            select_jev_tiles(&scores, RECAPTCHA.logistic_3x3.as_ref().unwrap().cutoff)
+            select_jev_tiles(&scores, recaptcha.logistic_3x3.as_ref().unwrap().cutoff)
         else {
             panic!("expected tiles")
         };
@@ -2700,7 +2863,7 @@ mod tests {
 
     /// A recorded grid decided under a plan, with the same steps in the same order as a live
     /// round. `whole_first` sets which box reply is heard first.
-    fn decide(plan: &Plan, tuned: &'static Tuned, grid: &Recorded, whole_first: bool) -> Vec<u8> {
+    fn decide(plan: &Plan, tuned: &Tuned, grid: &Recorded, whole_first: bool) -> Vec<u8> {
         let passes = plan
             .close_ups
             .iter()
@@ -2774,7 +2937,7 @@ mod tests {
     fn levels_select_what_was_measured(
         packed: &[u8],
         grid_count: usize,
-        tuned: &'static Tuned,
+        tuned: &Tuned,
         same: &[(&str, &str)],
     ) {
         use std::io::Read;
@@ -2795,7 +2958,7 @@ mod tests {
             let plan = efforts.plan(effort);
             let picked: Vec<_> = grids
                 .iter()
-                .map(|grid| decide(&plan, tuned, grid, true))
+                .map(|grid| decide(plan, tuned, grid, true))
                 .collect();
             let wrong: Vec<_> = grids
                 .iter()
@@ -2812,7 +2975,7 @@ mod tests {
             // Whichever box reply is heard first, the answer is the same.
             for (grid, picks) in grids.iter().zip(&picked) {
                 assert_eq!(
-                    &decide(&plan, tuned, grid, false),
+                    &decide(plan, tuned, grid, false),
                     picks,
                     "{name}, {}",
                     grid.id
@@ -2843,7 +3006,7 @@ mod tests {
         levels_select_what_was_measured(
             include_bytes!("../tests/fixtures/vllm_d3_ultra_4x4.json.gz"),
             644,
-            RECAPTCHA,
+            recaptcha_tuned("vLLM/d3-ultra"),
             &[],
         );
     }
@@ -2856,7 +3019,7 @@ mod tests {
         levels_select_what_was_measured(
             include_bytes!("../tests/fixtures/liquid_d1_2_4x4.json.gz"),
             339,
-            &crate::captcha::recaptcha::liquid::d1_2::TUNED,
+            recaptcha_tuned("Liquid/d1.2"),
             &[("medium", "high"), ("high", "max")],
         );
     }
@@ -2872,17 +3035,25 @@ mod tests {
                 .filter_map(|effort| efforts.plan(effort).boxes)
                 .collect::<Vec<_>>()
         };
-        assert!(rules(RECAPTCHA).iter().all(|rule| rule.every.is_none()));
         assert!(
-            Plan::record(Provider::Vllm.draws_every_instance())
-                .boxes
-                .unwrap()
-                .every
-                .is_none()
+            rules(recaptcha_tuned("vLLM/d3-ultra"))
+                .iter()
+                .all(|rule| rule.every.is_none())
+        );
+        assert!(
+            Plan::record(
+                WireProfile::for_provider(Provider::Vllm)
+                    .unwrap()
+                    .supports_every_box
+            )
+            .boxes
+            .unwrap()
+            .every
+            .is_none()
         );
         for tuned in [
-            &crate::captcha::recaptcha::liquid::d1_2::TUNED,
-            &crate::captcha::recaptcha::liquid::d1_2_ultra::TUNED,
+            recaptcha_tuned("Liquid/d1.2"),
+            recaptcha_tuned("Liquid/d1.2-ultra"),
         ] {
             let rules = rules(tuned);
             assert!(!rules.is_empty());
@@ -2897,7 +3068,7 @@ mod tests {
         levels_select_what_was_measured(
             include_bytes!("../tests/fixtures/liquid_d1_2_ultra_4x4.json.gz"),
             339,
-            &crate::captcha::recaptcha::liquid::d1_2_ultra::TUNED,
+            recaptcha_tuned("Liquid/d1.2-ultra"),
             &[("high", "max")],
         );
     }
@@ -2915,7 +3086,13 @@ mod tests {
             decision_components: Some(json!({})),
             provider_meta: None,
         };
-        let rule = RECAPTCHA.efforts.as_ref().unwrap().max.boxes.unwrap();
+        let rule = recaptcha_tuned("vLLM/d3-ultra")
+            .efforts
+            .as_ref()
+            .unwrap()
+            .max
+            .boxes
+            .unwrap();
         let on = |tile: u8| {
             let (row, column) = (f64::from((tile - 1) / 4), f64::from((tile - 1) % 4));
             boxes::Found {
@@ -2973,7 +3150,7 @@ mod tests {
             0.463749, 0.983213, 0.942063, 0.669614, 0.998127, 0.999454, 0.996333, 0.998662,
             0.019002, 0.972076, 0.725535, 0.974846, 0.996249, 0.988316, 0.991891, 0.991116,
         ]);
-        let scores = logistic_scores(&whole, &crops, 4, RECAPTCHA).unwrap();
+        let scores = logistic_scores(&whole, &crops, 4, recaptcha_tuned("vLLM/d3-ultra")).unwrap();
         assert_close(
             &scores,
             &[
@@ -2984,5 +3161,59 @@ mod tests {
         assert_eq!(edge_neighbors(1, 4).collect::<Vec<_>>(), [5, 2]);
         assert_eq!(edge_neighbors(6, 4).collect::<Vec<_>>(), [2, 10, 5, 7]);
         assert_eq!(edge_neighbors(16, 4).collect::<Vec<_>>(), [12, 15]);
+    }
+
+    #[test]
+    fn provider_agnostic_cli_flags_and_legacy_aliases_both_parse() {
+        #[derive(clap::Parser)]
+        struct Cli {
+            #[command(flatten)]
+            options: ProviderOptions,
+        }
+        let modern = <Cli as clap::Parser>::parse_from([
+            "test",
+            "--provider",
+            "vllm",
+            "--decision-rule",
+            "average",
+            "--whole-grid-weight-3x3",
+            "0.4",
+            "--whole-grid-weight-4x4",
+            "0.6",
+            "--box-wait",
+            "--close-ups-per-request",
+            "3",
+            "--cold-connections",
+            "--record",
+        ])
+        .options;
+        let legacy = <Cli as clap::Parser>::parse_from([
+            "test",
+            "--provider",
+            "vllm",
+            "--vllm-decision",
+            "average",
+            "--vllm-whole-grid-weight-3x3",
+            "0.4",
+            "--vllm-whole-grid-weight-4x4",
+            "0.6",
+            "--vllm-box-wait",
+            "--vllm-close-ups-per-request",
+            "3",
+            "--vllm-cold-connections",
+            "--record-4x4",
+        ])
+        .options;
+        assert_eq!(modern.decision_rule, legacy.decision_rule);
+        assert_eq!(modern.decision_rule, Some(VllmDecision::Average));
+        assert_eq!(modern.whole_grid_weight_3x3, legacy.whole_grid_weight_3x3);
+        assert_eq!(modern.whole_grid_weight_4x4, legacy.whole_grid_weight_4x4);
+        assert_eq!(modern.box_wait, legacy.box_wait);
+        assert!(modern.box_wait);
+        assert_eq!(modern.close_ups_per_request, legacy.close_ups_per_request);
+        assert_eq!(modern.cold_connections, legacy.cold_connections);
+        assert!(modern.cold_connections);
+        assert_eq!(modern.record, legacy.record);
+        assert!(modern.record);
     }
 }

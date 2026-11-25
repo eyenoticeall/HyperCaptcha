@@ -250,6 +250,20 @@ impl Lab {
                     ),
                     ("effort", json!(backend.and_then(|backend| backend.effort))),
                     ("plan_4x4", json!(backend.and_then(Backend::plan_4x4))),
+                    (
+                        "supports_vision",
+                        json!(backend.is_some_and(|backend| backend.provider.supports_vision())),
+                    ),
+                    (
+                        "requires_vision_check",
+                        json!(
+                            backend.is_some_and(|backend| backend.provider.requires_vision_check())
+                        ),
+                    ),
+                    (
+                        "is_decision",
+                        json!(backend.is_some_and(|backend| backend.provider.is_decision())),
+                    ),
                     ("api_keys", json!(backend.map(Backend::key_count))),
                 ] {
                     config[name] = value;
@@ -305,7 +319,7 @@ impl Lab {
         let backend = self
             .backend
             .as_ref()
-            .context("Start the lab with --provider jev or --provider vllm.")?;
+            .context("Start the lab with a decision provider (--provider or --model-config).")?;
         let trial: Trial = read_json(request)?;
         validate_id(&trial.trial_id)?;
         let start = Instant::now();

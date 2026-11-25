@@ -1,0 +1,15 @@
+# typesafe/Jev on Google's image grids.
+#
+# Jev is asked one question per tile on a single picture of the grid unless `--jev-vision`
+# says otherwise, so it has none of the settings of a model that is asked about every tile
+# twice. Its endpoint inherits the built-in `jev` defaults:
+# - System One named-assets dialect at `https://api.typesafe.ai/v1` (or `JEV_BASE_URL`)
+# - API key from `TYPESAFE_API_KEY` or `JEV_API_KEY`
+# - PNG pictures (`image_format = "png"`), nearest-neighbour close-ups (`crop_filter = "nearest"`)
+# - `TypeSafe-Danger-Zone-Images: true` header on image requests
+
+schema_version = 1
+service = "recaptcha"
+name = "typesafe/Jev"
+provider = "jev"
+model_id = "jev-latest"

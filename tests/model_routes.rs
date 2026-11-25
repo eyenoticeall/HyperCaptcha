@@ -2233,3 +2233,939 @@ fn hcaptcha_grids_are_found_in_a_screenshot_and_answered_picture_by_picture() {
     assert!(result["vllm_components"].get("boxes").is_none());
     assert!(result["vllm_components"].get("presence").is_none());
 }
+
+struct TempFile(std::path::PathBuf);
+
+impl TempFile {
+    fn write(name: &str, content: &str) -> Self {
+        let path =
+            std::env::temp_dir().join(format!("hypercaptcha-test-{}-{name}", std::process::id()));
+        std::fs::write(&path, content).unwrap();
+        Self(path)
+    }
+}
+
+impl Drop for TempFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+#[test]
+fn custom_model_config_drives_assets_and_images_dialects_end_to_end() {
+    // Part 1: Custom `systemone-assets` endpoint with gzip, return_meta, custom header, custom
+    // env var, and custom fitted logistic weights + effort levels.
+    {
+        let mock = Server::http("127.0.0.1:0").unwrap();
+        let api_base = format!("http://{}/v1", mock.server_addr());
+        let config_file = TempFile::write(
+            "custom-assets.toml",
+            &format!(
+                r#"
+schema_version = 1
+service = "recaptcha"
+name = "Acme/vision-alpha"
+provider = "custom"
+model_id = "acme/vision-alpha-v1"
+
+[endpoint]
+dialect = "systemone-assets"
+base_url = "{api_base}"
+api_key_env = "ACME_ALPHA_KEY"
+image_format = "jpeg"
+crop_filter = "bilinear"
+gzip = true
+max_images = 16
+multi_state_windows = true
+supports_every_box = false
+return_meta = true
+hedge_on_stall = false
+warm_connections = false
+min_patch_tokens = false
+extra_headers = {{ "X-Acme-Header" = "alpha-42" }}
+
+[tuning]
+default_decision = "logistic"
+
+[tuning.logistic_4x4]
+weights = [0.223152, 1.092908, 0.213385, 0.18743, -1.509533]
+
+[tuning.efforts.low]
+close_ups = ["capture"]
+select_from = 0.55
+
+[tuning.efforts.medium]
+close_ups = ["capture"]
+select_from = 0.55
+
+[tuning.efforts.medium.boxes]
+exempt_from = 0.9525741268224334
+whole = 0.3
+cover = 0.01
+inside = 0.0
+
+[tuning.efforts.high]
+close_ups = ["capture", 506]
+select_from = 0.5
+
+[tuning.efforts.max]
+close_ups = ["capture", 506]
+select_from = 0.5
+"#
+            ),
+        );
+
+        let server =
+            thread::spawn(move || {
+                // 2 vision checks + 1 whole grid + 4 close-up requests + 1 whole-grid box request.
+                let mut saw_boxes = 0;
+                for index in 0..8 {
+                    let mut request = mock.recv_timeout(Duration::from_secs(10)).unwrap().unwrap();
+                    assert_eq!(request.url(), "/v1/systemone");
+                    assert!(request.headers().iter().any(|h| {
+                        h.field.equiv("Authorization") && h.value.as_str() == "Bearer secret-alpha"
+                    }));
+                    assert!(request.headers().iter().any(|h| {
+                        h.field.equiv("X-Acme-Header") && h.value.as_str() == "alpha-42"
+                    }));
+                    assert!(request.headers().iter().any(|h| {
+                        h.field.equiv("Content-Encoding") && h.value.as_str() == "gzip"
+                    }));
+                    let body = json_body(&mut request);
+                    assert_eq!(body["model"], "acme/vision-alpha-v1");
+                    assert_eq!(body["options"]["return_meta"], true);
+                    let reply = if index < 2 {
+                        assert!(body["assets"].is_object());
+                        json!({
+                            "model": "acme/vision-alpha-v1",
+                            "answers": {"red": {"noul": if index == 0 { 0.99 } else { 0.01 }}},
+                            "usage": {"input_tokens": 10, "output_tokens": 0}
+                        })
+                    } else if body["images"].is_array() {
+                        saw_boxes += 1;
+                        // Cover only square 16 so square 15 gets vetoed by the box rule.
+                        let square16 =
+                            json!({"left": 0.75, "top": 0.75, "right": 1.0, "bottom": 1.0});
+                        let answers: serde_json::Map<String, Value> = body["questions"]
+                            .as_object()
+                            .unwrap()
+                            .keys()
+                            .enumerate()
+                            .map(|(i, name)| {
+                                let answer = if i == 0 {
+                                    json!({"type": "box", "box": square16, "confidence": 0.8})
+                                } else {
+                                    json!({"type": "box", "box": null, "confidence": 0.0})
+                                };
+                                (name.clone(), answer)
+                            })
+                            .collect();
+                        json!({
+                            "model": "acme/vision-alpha-v1",
+                            "answers": answers,
+                            "usage": {"input_tokens": 10, "output_tokens": 0}
+                        })
+                    } else {
+                        assert!(body["assets"].is_object());
+                        let answers: serde_json::Map<String, Value> = body["questions"]
+                            .as_object()
+                            .unwrap()
+                            .keys()
+                            .map(|id| {
+                                let score = if ["tile_15", "tile_16"].contains(&id.as_str()) {
+                                    0.9
+                                } else {
+                                    0.0
+                                };
+                                (id.clone(), json!({"noul": score}))
+                            })
+                            .collect();
+                        json!({
+                            "model": "acme/vision-alpha-v1",
+                            "answers": answers,
+                            "usage": {"input_tokens": 10, "output_tokens": 0}
+                        })
+                    };
+                    request
+                        .respond(Response::from_string(reply.to_string()))
+                        .unwrap();
+                }
+                assert_eq!(saw_boxes, 1);
+            });
+
+        let mut lab = LabProcess(
+            Command::new(env!("CARGO_BIN_EXE_hypercaptcha"))
+                .args([
+                    "serve",
+                    "--mode",
+                    "v2",
+                    "--port",
+                    "0",
+                    "--timeout",
+                    "5",
+                    "--model-config",
+                    config_file.0.to_str().unwrap(),
+                    "--effort",
+                    "medium",
+                    "--box-wait",
+                ])
+                .env("RECAPTCHA_SITE_KEY", "test-site")
+                .env("RECAPTCHA_SECRET_KEY", "test-secret")
+                .env("ACME_ALPHA_KEY", "secret-alpha")
+                .stdout(Stdio::piped())
+                .spawn()
+                .unwrap(),
+        );
+        let mut line = String::new();
+        BufReader::new(lab.0.stdout.take().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        let url = line.trim().strip_prefix("Open ").unwrap().to_string();
+
+        let client = Client::new();
+        let config: Value = client
+            .get(format!("{url}/config"))
+            .send()
+            .unwrap()
+            .json()
+            .unwrap();
+        assert_eq!(config["provider"], "custom");
+        assert_eq!(config["model"], "acme/vision-alpha-v1");
+        assert_eq!(config["model_name"], "Acme/vision-alpha");
+        assert_eq!(config["effort"], "medium");
+        assert_eq!(config["supports_vision"], true);
+        assert_eq!(config["requires_vision_check"], true);
+        assert_eq!(config["is_decision"], true);
+        assert_eq!(config["plan_4x4"]["close_ups"], json!([null]));
+        assert_eq!(config["tile_threshold_4x4"], 0.55);
+
+        let image = STANDARD.encode(
+            tiny_skia::Pixmap::new(320, 320)
+                .unwrap()
+                .encode_png()
+                .unwrap(),
+        );
+        let reply: Value = client
+            .post(format!("{url}/model"))
+            .header("Origin", &url)
+            .json(&json!({
+                "trial_id": "custom-assets",
+                "source": "chrome",
+                "layout": 4,
+                "prompt": "Select all squares with\nbicycles",
+                "image": image,
+            }))
+            .send()
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .unwrap();
+        server.join().unwrap();
+        assert_eq!(reply["result"]["status"], "answered");
+        assert_eq!(reply["result"]["prediction"]["value"], json!([16]));
+        assert_eq!(
+            reply["result"]["vllm_components"]["boxes"]["removed"],
+            json!([15])
+        );
+    }
+
+    // Part 2: Custom `systemone-images` endpoint with positional images, custom max_images,
+    // supports_every_box, min_patch_tokens, and custom header.
+    {
+        let (api_base, mock) = many_at_once();
+        let config_file = TempFile::write(
+            "custom-images.toml",
+            &format!(
+                r#"
+schema_version = 1
+service = "recaptcha"
+name = "Beta/img-v2"
+provider = "custom"
+model_id = "beta-img-v2"
+
+[endpoint]
+dialect = "systemone-images"
+base_url = "{api_base}"
+api_key_env = "BETA_IMG_KEY"
+image_format = "jpeg"
+crop_filter = "bilinear"
+gzip = false
+max_images = 6
+multi_state_windows = false
+supports_every_box = true
+return_meta = false
+hedge_on_stall = false
+warm_connections = false
+min_patch_tokens = true
+extra_headers = {{ "X-Beta-Dialect" = "positional" }}
+
+[tuning]
+default_decision = "logistic"
+
+[tuning.logistic_4x4]
+weights = [0.325707, 1.717633, 0.364472, 0.151428, -2.083722]
+
+[tuning.efforts.low]
+close_ups = ["capture"]
+select_from = 0.4
+
+[tuning.efforts.medium]
+close_ups = ["capture"]
+select_from = 0.4
+
+[tuning.efforts.medium.boxes]
+exempt_from = 0.9
+every = 0.3
+cover = 0.01
+inside = 0.0
+
+[tuning.efforts.high]
+close_ups = ["capture"]
+select_from = 0.4
+
+[tuning.efforts.high.boxes]
+exempt_from = 0.9
+every = 0.3
+cover = 0.01
+inside = 0.0
+
+[tuning.efforts.max]
+close_ups = ["capture"]
+select_from = 0.4
+
+[tuning.efforts.max.boxes]
+exempt_from = 0.9
+every = 0.3
+cover = 0.01
+inside = 0.0
+"#
+            ),
+        );
+
+        let server = thread::spawn(move || {
+            let mut saw_every = 0;
+            // 2 vision checks + 1 whole grid + 4 close-up requests (max_images=6 caps 4x4 batch
+            // to 5 crops -> 4 batches of 4) + 1 every-instance box request.
+            for index in 0..8 {
+                let request = mock.recv_timeout(Duration::from_secs(10)).unwrap();
+                assert_eq!(request.header("Authorization"), Some("Bearer secret-beta"));
+                assert_eq!(request.header("X-Beta-Dialect"), Some("positional"));
+                assert_eq!(request.header("Content-Encoding"), None);
+                let body = &request.body;
+                assert_eq!(body["model"], "beta-img-v2");
+                assert!(body.get("assets").is_none());
+                let images = body["images"].as_array().unwrap();
+                assert!(images.len() <= 6, "exceeded max_images=6: {}", images.len());
+                let questions = body["questions"].as_object().unwrap();
+                let answers: serde_json::Map<String, Value> = if index < 2 {
+                    assert!(body.get("options").is_none());
+                    json!({"red": {"noul": if index == 0 { 0.99 } else { 0.01 }}})
+                        .as_object()
+                        .unwrap()
+                        .clone()
+                } else if questions.values().all(|q| q["type"] == "boxes") {
+                    saw_every += 1;
+                    let rect = json!({"left": 0.5, "top": 0.75, "right": 1.0, "bottom": 1.0});
+                    json!({"q": {
+                        "type": "boxes", "count": 1, "at_least": false,
+                        "boxes": [{"box": rect, "found": 0.9, "confidence": 0.8}],
+                    }})
+                    .as_object()
+                    .unwrap()
+                    .clone()
+                } else {
+                    assert!(body.get("options").is_none());
+                    questions
+                        .keys()
+                        .map(|id| {
+                            let score = match id.as_str() {
+                                "tile_15" | "tile_16" => 0.9,
+                                "tile_14" => 0.6,
+                                _ => 0.0,
+                            };
+                            (id.clone(), json!({"type": "noul", "noul": score}))
+                        })
+                        .collect()
+                };
+                let reply = json!({
+                    "model": "beta-img-v2",
+                    "answers": answers,
+                    "usage": {"input_tokens": 5000, "output_tokens": 0},
+                });
+                request.reply.send(reply.to_string()).unwrap();
+            }
+            assert_eq!(saw_every, 1);
+        });
+
+        let mut lab = LabProcess(
+            Command::new(env!("CARGO_BIN_EXE_hypercaptcha"))
+                .args([
+                    "serve",
+                    "--mode",
+                    "v2",
+                    "--port",
+                    "0",
+                    "--timeout",
+                    "10",
+                    "--model-config",
+                    config_file.0.to_str().unwrap(),
+                    "--close-ups-per-request",
+                    "9",
+                    "--box-wait",
+                ])
+                .env("RECAPTCHA_SITE_KEY", "test-site")
+                .env("RECAPTCHA_SECRET_KEY", "test-secret")
+                .env("BETA_IMG_KEY", "secret-beta")
+                .stdout(Stdio::piped())
+                .spawn()
+                .unwrap(),
+        );
+        let mut line = String::new();
+        BufReader::new(lab.0.stdout.take().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        let url = line.trim().strip_prefix("Open ").unwrap().to_string();
+
+        let client = Client::new();
+        let image = STANDARD.encode(
+            tiny_skia::Pixmap::new(320, 320)
+                .unwrap()
+                .encode_png()
+                .unwrap(),
+        );
+        let reply: Value = client
+            .post(format!("{url}/model"))
+            .header("Origin", &url)
+            .json(&json!({
+                "trial_id": "custom-images",
+                "source": "chrome",
+                "layout": 4,
+                "prompt": "Select all squares with\nbicycles",
+                "image": image,
+            }))
+            .send()
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .unwrap();
+        server.join().unwrap();
+        assert_eq!(reply["result"]["status"], "answered");
+        assert_eq!(reply["result"]["prediction"]["value"], json!([15, 16]));
+        assert_eq!(
+            reply["result"]["vllm_components"]["boxes"]["removed"],
+            json!([14])
+        );
+    }
+}
+
+#[test]
+fn unmeasured_models_can_be_recorded_and_evaluated_with_provider_agnostic_flags() {
+    // 1. Unmeasured vLLM model with `--record` and `--cold-connections` works on both 3 × 3 and 4 × 4.
+    {
+        let mock = Server::http("127.0.0.1:0").unwrap();
+        let api_base = format!("http://{}/v1", mock.server_addr());
+        let server = thread::spawn(move || {
+            // 2 vision checks + 3 × 3 (1 whole + 3 photo batches)
+            // + 4 × 4 record (1 whole + 8 close-up batches + 1 presence + 1 whole box + 1 windows box).
+            for index in 0..2 + 4 + 12 {
+                let mut request = mock.recv_timeout(Duration::from_secs(10)).unwrap().unwrap();
+                let body = json_body(&mut request);
+                assert_eq!(body["model"], "vllm-sr/brand-new");
+                let reply = if index < 2 {
+                    json!({"answers": {"red": {"noul": if index == 0 { 0.99 } else { 0.01 }}}})
+                } else if body["states"].is_object() {
+                    let states: serde_json::Map<String, Value> = body["states"]
+                        .as_object()
+                        .unwrap()
+                        .keys()
+                        .map(|name| {
+                            (
+                                name.clone(),
+                                json!({"answers": {"q": {"type": "box", "box": null, "confidence": 0.0}}}),
+                            )
+                        })
+                        .collect();
+                    json!({"states": states})
+                } else if body["images"].is_array() {
+                    let answers: serde_json::Map<String, Value> = body["questions"]
+                        .as_object()
+                        .unwrap()
+                        .keys()
+                        .map(|name| {
+                            (
+                                name.clone(),
+                                json!({"type": "box", "box": null, "confidence": 0.0}),
+                            )
+                        })
+                        .collect();
+                    json!({"answers": answers})
+                } else {
+                    let answers: serde_json::Map<String, Value> = body["questions"]
+                        .as_object()
+                        .unwrap()
+                        .keys()
+                        .map(|id| {
+                            let score = if matches!(id.as_str(), "tile_01" | "tile_16" | "present")
+                            {
+                                0.9
+                            } else {
+                                0.0
+                            };
+                            (id.clone(), json!({"noul": score}))
+                        })
+                        .collect();
+                    json!({"answers": answers})
+                };
+                let mut reply = reply;
+                reply["model"] = json!("vllm-sr/brand-new");
+                reply["usage"] = json!({"input_tokens": 10, "output_tokens": 0});
+                request
+                    .respond(Response::from_string(reply.to_string()))
+                    .unwrap();
+            }
+        });
+
+        let mut lab = LabProcess(
+            Command::new(env!("CARGO_BIN_EXE_hypercaptcha"))
+                .args([
+                    "serve",
+                    "--mode",
+                    "v2",
+                    "--port",
+                    "0",
+                    "--provider",
+                    "vllm",
+                    "--model",
+                    "vllm-sr/brand-new",
+                    "--base-url",
+                    &api_base,
+                    "--record",
+                    "--cold-connections",
+                ])
+                .env("RECAPTCHA_SITE_KEY", "test-site")
+                .env("RECAPTCHA_SECRET_KEY", "test-secret")
+                .env("VLLM_SR_API_KEY", "test-vllm-key")
+                .stdout(Stdio::piped())
+                .spawn()
+                .unwrap(),
+        );
+        let mut line = String::new();
+        BufReader::new(lab.0.stdout.take().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        let url = line.trim().strip_prefix("Open ").unwrap().to_string();
+        let client = Client::new();
+        let config: Value = client
+            .get(format!("{url}/config"))
+            .send()
+            .unwrap()
+            .json()
+            .unwrap();
+        assert_eq!(config["model"], "vllm-sr/brand-new");
+        assert_eq!(config["vllm_decision"], "average");
+        assert_eq!(config["effort"], Value::Null);
+        assert_eq!(config["plan_4x4"]["close_ups"], json!([null, 506]));
+        assert_eq!(config["plan_4x4"]["boxes"]["every"], Value::Null);
+
+        let image = STANDARD.encode(
+            tiny_skia::Pixmap::new(320, 320)
+                .unwrap()
+                .encode_png()
+                .unwrap(),
+        );
+        let r3: Value = client
+            .post(format!("{url}/model"))
+            .header("Origin", &url)
+            .json(&json!({
+                "trial_id": "unmeasured-3x3",
+                "source": "chrome",
+                "layout": 3,
+                "prompt": "Select all images with\nbicycles",
+                "image": image,
+            }))
+            .send()
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .unwrap();
+        assert_eq!(r3["result"]["prediction"]["value"], json!([1]));
+        assert_eq!(r3["result"]["vllm_components"]["rule"], "average");
+
+        let r4: Value = client
+            .post(format!("{url}/model"))
+            .header("Origin", &url)
+            .json(&json!({
+                "trial_id": "unmeasured-4x4",
+                "source": "chrome",
+                "layout": 4,
+                "prompt": "Select all squares with\nbicycles\nIf there are none, click skip",
+                "image": image,
+            }))
+            .send()
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .unwrap();
+        server.join().unwrap();
+        assert_eq!(r4["result"]["prediction"]["value"], json!([1, 16]));
+        assert_eq!(
+            r4["result"]["vllm_components"]["boxes"]["removed"],
+            json!([])
+        );
+        assert_eq!(
+            r4["result"]["vllm_components"]["presence"]["probability"],
+            0.9
+        );
+    }
+
+    // 1b. Unmeasured Liquid model with `--record` uses positional images, `every` box, and 16
+    // single-state window boxes without needing a pre-existing settings file.
+    {
+        let (api_base, mock) = many_at_once();
+        let server = thread::spawn(move || {
+            let mut saw_every = 0;
+            let mut saw_windows = 0;
+            // 2 vision checks + 1 whole + 8 close-up batches + 1 presence + 1 whole box + 1 every box + 16 window boxes.
+            for index in 0..2 + 1 + 8 + 1 + 2 + 16 {
+                let request = mock.recv_timeout(Duration::from_secs(30)).unwrap();
+                let body = &request.body;
+                assert_eq!(body["model"], "d1.9-unmeasured");
+                assert!(body["images"].is_array());
+                let questions = body["questions"].as_object().unwrap();
+                let answers: serde_json::Map<String, Value> = if index < 2 {
+                    json!({"red": {"noul": if index == 0 { 0.99 } else { 0.01 }}})
+                        .as_object()
+                        .unwrap()
+                        .clone()
+                } else if questions.values().all(|q| q["type"] == "boxes") {
+                    saw_every += 1;
+                    json!({"q": {"type": "boxes", "count": 0, "at_least": false, "boxes": []}})
+                        .as_object()
+                        .unwrap()
+                        .clone()
+                } else if questions.values().all(|q| q["type"] == "box") {
+                    if questions.len() == 1 {
+                        saw_windows += 1;
+                    }
+                    questions
+                        .keys()
+                        .map(|name| {
+                            (
+                                name.clone(),
+                                json!({"type": "box", "box": null, "confidence": 0.0}),
+                            )
+                        })
+                        .collect()
+                } else {
+                    questions
+                        .keys()
+                        .map(|id| {
+                            let score = if matches!(id.as_str(), "tile_16" | "present") {
+                                0.9
+                            } else {
+                                0.0
+                            };
+                            (id.clone(), json!({"type": "noul", "noul": score}))
+                        })
+                        .collect()
+                };
+                let reply = json!({
+                    "model": "d1.9-unmeasured",
+                    "answers": answers,
+                    "usage": {"input_tokens": 5000, "output_tokens": 0},
+                });
+                request.reply.send(reply.to_string()).unwrap();
+            }
+            assert_eq!((saw_every, saw_windows), (1, 16));
+        });
+
+        let mut lab = LabProcess(
+            Command::new(env!("CARGO_BIN_EXE_hypercaptcha"))
+                .args([
+                    "serve",
+                    "--mode",
+                    "v2",
+                    "--port",
+                    "0",
+                    "--timeout",
+                    "20",
+                    "--provider",
+                    "liquid",
+                    "--model",
+                    "d1.9-unmeasured",
+                    "--base-url",
+                    &api_base,
+                    "--record",
+                ])
+                .env("RECAPTCHA_SITE_KEY", "test-site")
+                .env("RECAPTCHA_SECRET_KEY", "test-secret")
+                .env("LIQUID_API_KEY", "test-liquid-key")
+                .stdout(Stdio::piped())
+                .spawn()
+                .unwrap(),
+        );
+        let mut line = String::new();
+        BufReader::new(lab.0.stdout.take().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        let url = line.trim().strip_prefix("Open ").unwrap().to_string();
+        let image = STANDARD.encode(
+            tiny_skia::Pixmap::new(320, 320)
+                .unwrap()
+                .encode_png()
+                .unwrap(),
+        );
+        let reply: Value = Client::new()
+            .post(format!("{url}/model"))
+            .header("Origin", &url)
+            .json(&json!({
+                "trial_id": "liquid-unmeasured-record",
+                "source": "chrome",
+                "layout": 4,
+                "prompt": "Select all squares with\nbicycles\nIf there are none, click skip",
+                "image": image,
+            }))
+            .send()
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .unwrap();
+        server.join().unwrap();
+        assert_eq!(reply["result"]["status"], "answered");
+        assert_eq!(reply["result"]["prediction"]["value"], json!([16]));
+        assert_eq!(reply["result"]["decision_requests"], 28);
+        assert_eq!(reply["result"]["vllm_components"]["rule"], "average");
+        assert_eq!(
+            reply["result"]["vllm_components"]["boxes"]["removed"],
+            json!([])
+        );
+    }
+
+    // 2. Unmeasured Liquid model on hCaptcha works when `--decision-rule average` is passed.
+    {
+        let (api_base, mock) = many_at_once();
+        let server = thread::spawn(move || {
+            // 2 vision checks + 1 whole grid + 3 photo batches.
+            for index in 0..6 {
+                let request = mock.recv_timeout(Duration::from_secs(10)).unwrap();
+                let body = &request.body;
+                assert_eq!(body["model"], "d1.2");
+                assert!(body["images"].is_array());
+                let questions = body["questions"].as_object().unwrap();
+                let answers: serde_json::Map<String, Value> = if index < 2 {
+                    json!({"red": {"noul": if index == 0 { 0.99 } else { 0.01 }}})
+                        .as_object()
+                        .unwrap()
+                        .clone()
+                } else {
+                    questions
+                        .keys()
+                        .map(|id| {
+                            let score = if id == "tile_03" { 0.85 } else { 0.1 };
+                            (id.clone(), json!({"type": "noul", "noul": score}))
+                        })
+                        .collect()
+                };
+                let reply = json!({
+                    "model": "d1.2",
+                    "answers": answers,
+                    "usage": {"input_tokens": 5000, "output_tokens": 0},
+                });
+                request.reply.send(reply.to_string()).unwrap();
+            }
+        });
+
+        let mut lab = LabProcess(
+            Command::new(env!("CARGO_BIN_EXE_hypercaptcha"))
+                .args([
+                    "serve",
+                    "--captcha",
+                    "hcaptcha",
+                    "--hcaptcha-test-key",
+                    "--port",
+                    "0",
+                    "--provider",
+                    "liquid",
+                    "--model",
+                    "d1.2",
+                    "--decision-rule",
+                    "average",
+                    "--base-url",
+                    &api_base,
+                ])
+                .env("LIQUID_API_KEY", "test-liquid-key")
+                .stdout(Stdio::piped())
+                .spawn()
+                .unwrap(),
+        );
+        let mut line = String::new();
+        BufReader::new(lab.0.stdout.take().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        let url = line.trim().strip_prefix("Open ").unwrap().to_string();
+        let port: u16 = url
+            .strip_prefix("http://hypercaptcha.localhost:")
+            .unwrap()
+            .parse()
+            .unwrap();
+        let client = Client::builder()
+            .resolve("hypercaptcha.localhost", ([127, 0, 0, 1], port).into())
+            .build()
+            .unwrap();
+        let config: Value = client
+            .get(format!("{url}/config"))
+            .send()
+            .unwrap()
+            .json()
+            .unwrap();
+        assert_eq!(config["captcha"], "hcaptcha");
+        assert_eq!(config["provider"], "liquid");
+        assert_eq!(config["supports_vision"], true);
+        assert_eq!(config["requires_vision_check"], true);
+        assert_eq!(config["is_decision"], true);
+
+        let reply: Value = client
+            .post(format!("{url}/model"))
+            .header("Origin", &url)
+            .json(&json!({
+                "trial_id": "hcaptcha-liquid",
+                "source": "chrome",
+                "prompt": "Pick the flying animal",
+                "image": hcaptcha_screenshot(),
+            }))
+            .send()
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .unwrap();
+        server.join().unwrap();
+        assert_eq!(reply["result"]["status"], "answered");
+        assert_eq!(reply["result"]["prediction"]["value"], json!([3]));
+    }
+}
+
+#[test]
+fn config_endpoint_exposes_vision_and_decision_capabilities() {
+    let cases: &[(&[&str], bool, bool, bool)] = &[
+        (&[], false, false, false),
+        (
+            &[
+                "--provider",
+                "openai-completions",
+                "--model",
+                "gpt-3.5-turbo-instruct",
+            ],
+            false,
+            false,
+            false,
+        ),
+        (
+            &["--provider", "openai-chat", "--model", "gpt-4o"],
+            true,
+            false,
+            false,
+        ),
+        (&["--provider", "jev"], true, true, true),
+        (
+            &["--provider", "vllm", "--cold-connections"],
+            true,
+            true,
+            true,
+        ),
+        (&["--provider", "liquid"], true, true, true),
+    ];
+    for &(args, supports_vision, requires_vision_check, is_decision) in cases {
+        let mut lab = LabProcess(
+            Command::new(env!("CARGO_BIN_EXE_hypercaptcha"))
+                .args(["serve", "--mode", "v2", "--port", "0"])
+                .args(args)
+                .env("RECAPTCHA_SITE_KEY", "test-site")
+                .env("RECAPTCHA_SECRET_KEY", "test-secret")
+                .env("OPENAI_API_KEY", "test-openai-key")
+                .env("TYPESAFE_API_KEY", "test-jev-key")
+                .env("VLLM_SR_API_KEY", "test-vllm-key")
+                .env("LIQUID_API_KEY", "test-liquid-key")
+                .stdout(Stdio::piped())
+                .spawn()
+                .unwrap(),
+        );
+        let mut line = String::new();
+        BufReader::new(lab.0.stdout.take().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        let url = line.trim().strip_prefix("Open ").unwrap();
+        let config: Value = Client::new()
+            .get(format!("{url}/config"))
+            .send()
+            .unwrap()
+            .json()
+            .unwrap();
+        assert_eq!(config["supports_vision"], supports_vision, "{args:?}");
+        assert_eq!(
+            config["requires_vision_check"], requires_vision_check,
+            "{args:?}"
+        );
+        assert_eq!(config["is_decision"], is_decision, "{args:?}");
+    }
+
+    // Service mismatch and missing --model-config for --provider custom are rejected.
+    let hcaptcha_cfg = TempFile::write(
+        "hcaptcha-only.toml",
+        r#"
+schema_version = 1
+service = "hcaptcha"
+name = "vLLM/d3-ultra"
+provider = "vllm"
+model_id = "vllm-sr/d3-ultra"
+"#,
+    );
+    let mismatch = Command::new(env!("CARGO_BIN_EXE_hypercaptcha"))
+        .args([
+            "serve",
+            "--mode",
+            "v2",
+            "--port",
+            "0",
+            "--model-config",
+            hcaptcha_cfg.0.to_str().unwrap(),
+        ])
+        .env("RECAPTCHA_SITE_KEY", "test-site")
+        .env("RECAPTCHA_SECRET_KEY", "test-secret")
+        .env("VLLM_SR_API_KEY", "test-vllm-key")
+        .output()
+        .unwrap();
+    assert!(!mismatch.status.success());
+    assert!(
+        String::from_utf8_lossy(&mismatch.stderr).contains("is for --captcha hcaptcha"),
+        "{}",
+        String::from_utf8_lossy(&mismatch.stderr)
+    );
+
+    let custom_no_cfg = Command::new(env!("CARGO_BIN_EXE_hypercaptcha"))
+        .args([
+            "serve",
+            "--mode",
+            "v2",
+            "--port",
+            "0",
+            "--provider",
+            "custom",
+        ])
+        .env("RECAPTCHA_SITE_KEY", "test-site")
+        .env("RECAPTCHA_SECRET_KEY", "test-secret")
+        .output()
+        .unwrap();
+    assert!(!custom_no_cfg.status.success());
+    assert!(
+        String::from_utf8_lossy(&custom_no_cfg.stderr)
+            .contains("--provider custom requires --model-config"),
+        "{}",
+        String::from_utf8_lossy(&custom_no_cfg.stderr)
+    );
+}

@@ -1,0 +1,122 @@
+# vLLM/d3-ultra on Google's image grids: what was measured with it.
+#
+# Every number here belongs to this model as vLLM serves it. Another model scores the same
+# pictures differently, so it gets a file of its own and inherits nothing from this one.
+#
+# Close-up passes: d3-ultra's close-up scores shift with image scale. The steadier single
+# pass is a copy of the grid 506 pixels on its longer side: alone it scored 6 to 12 grids
+# better than the capture alone. Two passes score the capture as well and average the two.
+#
+# Presence cutoff (skip_below = 0.7): labelled grids without the target scored at most 0.50
+# and grids with it at least 0.88.
+#
+# Effort levels, as chosen on 2026-11-18:
+#
+# Each level's settings are the best-scoring ones found for the requests it sends, in a sweep
+# of about 18 million settings over 339 graded 4 x 4 grids: 311 labelled square by square and
+# 28 live grids graded afterwards, with the user's stricter corrections of 2026-11-17 on 42 of
+# them. The scores below are on those same grids, so they flatter the settings: selecting
+# from 55% on one pass was also what other grids chose out of fold, and the gains at high and
+# at max are within a few grids. Tokens are for one round on a prompt that allows skipping.
+#
+# | level  | tokens | right of 339 | of the 311 labelled |
+# |--------|--------|--------------|---------------------|
+# | low    | 6,475  | 243 (71.7%)  | 233 (74.9%)         |
+# | medium | 7,915  | 274 (80.8%)  | 250 (80.4%)         |
+# | high   | 12,351 | 281 (82.9%)  | 257 (82.6%)         |
+# | max    | 16,755 | 282 (83.2%)  | 258 (83.0%)         |
+#
+# The settings in use before the levels (both passes, select from 50%, a box of confidence
+# 0.3 from either request) scored 271. Commit 815afc4 rebuilds them.
+
+schema_version = 1
+service = "recaptcha"
+name = "vLLM/d3-ultra"
+provider = "vllm"
+model_id = "vllm-sr/d3-ultra"
+
+[endpoint]
+dialect = "systemone-assets"
+base_url = "https://app.vllm-sr.ai/v1"
+api_key_env = "VLLM_SR_API_KEY"
+extra_api_keys_env = "VLLM_SR_EXTRA_API_KEYS"
+image_format = "jpeg"
+crop_filter = "bilinear"
+gzip = true
+max_images = 16
+multi_state_windows = true
+supports_every_box = false
+return_meta = true
+hedge_on_stall = true
+warm_connections = true
+min_patch_tokens = false
+
+[tuning]
+default_decision = "logistic"
+
+# Logistic rules on clipped log-odds. Coefficients were fitted on 320 model-labelled live
+# grids; a refit on human labels gave nearly the same shape, and a refit on the 339 graded
+# grids below was no better at any level.
+[tuning.logistic_3x3]
+weights = [0.571457, 0.939705, -1.719964]
+cutoff = 0.5
+
+[tuning.logistic_4x4]
+weights = [0.223152, 1.092908, 0.213385, 0.18743, -1.509533]
+
+[tuning.average_4x4]
+close_ups = ["capture", 506]
+select_from = 0.5
+skip_below = 0.7
+
+# One pass scores a little high, so squares are selected from 55%. With no boxes to check
+# a selection against, a square just over the line goes when only its close-up believes
+# in it. Selecting from 50% with no gap rule scored 233.
+[tuning.efforts.low]
+close_ups = [506]
+select_from = 0.55
+skip_below = 0.7
+
+[tuning.efforts.low.gap]
+under = 0.6
+more_than = 0.3
+
+# Selecting from 50% scored 269.
+[tuning.efforts.medium]
+close_ups = [506]
+select_from = 0.55
+skip_below = 0.7
+
+[tuning.efforts.medium.boxes]
+# Log-odds 3, a little over 95%.
+exempt_from = 0.9525741268224334
+whole = 0.3
+cover = 0.01
+inside = 0.0
+
+# With no share of the box asked to lie inside the square it scored 279.
+[tuning.efforts.high]
+close_ups = ["capture", 506]
+select_from = 0.5
+skip_below = 0.7
+
+[tuning.efforts.high.boxes]
+exempt_from = 0.9525741268224334
+whole = 0.3
+cover = 0.01
+inside = 0.01
+
+# A selection needs a box from both requests. Taking one from either, however the
+# thresholds were set, scored at most 278, under high. Faint whole-grid boxes count
+# because the window box is the stricter test; with 0.3 for both it scored 280.
+[tuning.efforts.max]
+close_ups = ["capture", 506]
+select_from = 0.5
+skip_below = 0.7
+
+[tuning.efforts.max.boxes]
+exempt_from = 0.9525741268224334
+whole = 0.02
+windows = 0.5
+cover = 0.01
+inside = 0.0

@@ -1,0 +1,30 @@
+# vLLM/d3-ultra on hCaptcha's 3 x 3 grids: starting settings.
+#
+# Nothing here has been fitted: there are no labelled hCaptcha grids, so the two views of a
+# picture are averaged with equal weight. Everything fitted on Google's street photos is off,
+# because it assumes one photo cut into squares, and here every tile is a picture of its own.
+
+schema_version = 1
+service = "hcaptcha"
+name = "vLLM/d3-ultra"
+provider = "vllm"
+model_id = "vllm-sr/d3-ultra"
+
+[endpoint]
+dialect = "systemone-assets"
+base_url = "https://app.vllm-sr.ai/v1"
+api_key_env = "VLLM_SR_API_KEY"
+extra_api_keys_env = "VLLM_SR_EXTRA_API_KEYS"
+image_format = "jpeg"
+crop_filter = "bilinear"
+gzip = true
+max_images = 16
+multi_state_windows = true
+supports_every_box = false
+return_meta = true
+hedge_on_stall = true
+warm_connections = true
+min_patch_tokens = false
+
+[tuning]
+default_decision = "average"

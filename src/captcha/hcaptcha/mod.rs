@@ -5,17 +5,14 @@
 //! moving object) are left alone.
 
 pub mod grid;
-pub mod vllm {
-    pub mod d3_ultra;
-}
 
-use std::time::Duration;
+use std::{sync::LazyLock, time::Duration};
 
 use anyhow::{Context, Result, bail};
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 
-use super::{PhotoQuestion, Profile};
+use super::{Model, PhotoQuestion, Profile, Service};
 use crate::providers::configured_env;
 
 /// hCaptcha's published test pair. It never shows a challenge and always verifies.
@@ -25,9 +22,19 @@ const TEST_SECRET: &str = "0x0000000000000000000000000000000000000000";
 /// `.localhost` to this machine, so this one needs no hosts entry.
 pub const DEFAULT_HOSTNAME: &str = "hypercaptcha.localhost";
 
+static MODELS: LazyLock<Vec<Model>> = LazyLock::new(|| {
+    [include_str!("../../../models/hcaptcha/vllm/d3-ultra.toml")]
+        .into_iter()
+        .map(|raw| {
+            Model::from_embedded_toml(raw, Service::Hcaptcha).expect("valid built-in config")
+        })
+        .collect()
+});
+
 /// What holds for hCaptcha's 3 × 3 grids whichever model answers them. Nothing has been
 /// fitted: there are no labelled hCaptcha grids, so the cutoff is one half.
 pub static PROFILE: Profile = Profile {
+    service: Service::Hcaptcha,
     layouts: &[3],
     target: instruction,
     allows_skipping: |_| false,
@@ -36,7 +43,7 @@ pub static PROFILE: Profile = Profile {
         task: "PHOTO is one of nine separate pictures in an image challenge. Is PHOTO a picture that `challenge_instructions` asks the user to select? Judge what PHOTO shows. Ignore faint overlaid patterns, text and noise.",
     },
     average_cutoff_3x3: 0.5,
-    models: &[&vllm::d3_ultra::MODEL],
+    models: &MODELS,
 };
 
 /// hCaptcha's instructions do not name one object in a fixed place, so the model is given the
