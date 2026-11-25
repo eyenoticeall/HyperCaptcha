@@ -433,8 +433,8 @@ class Plan:
             close_ups=tuple(normalize_close_up_spec(x) for x in raw_passes),
             select_from=float(data.get("select_from", 0.5)),
             skip_below=None if data.get("skip_below") is None else float(data["skip_below"]),
-            boxes=BoxRule.from_dict(data["boxes"]) if data.get("boxes") else None,
-            gap=GapRule.from_dict(data["gap"]) if data.get("gap") else None,
+            boxes=BoxRule.from_dict(data["boxes"]) if data.get("boxes") is not None else None,
+            gap=GapRule.from_dict(data["gap"]) if data.get("gap") is not None else None,
         )
 
 
@@ -520,7 +520,7 @@ class EndpointConfig:
 
 @dataclass(frozen=True)
 class TuningConfig:
-    default_decision: str = "logistic"
+    default_decision: str = "average"
     logistic_3x3: Logistic3x3 | None = None
     logistic_4x4: tuple[float, float, float, float, float] | None = None
     average_4x4: Plan | None = None
@@ -536,11 +536,11 @@ class TuningConfig:
                 raise ValueError(f"logistic_4x4.weights must have 5 values, got {len(raw_w)}")
             weights_4x4 = tuple(float(x) for x in raw_w)  # type: ignore[assignment]
         return cls(
-            default_decision=str(data.get("default_decision", "logistic")),
-            logistic_3x3=Logistic3x3.from_dict(data["logistic_3x3"]) if data.get("logistic_3x3") else None,
+            default_decision=str(data.get("default_decision", "average")),
+            logistic_3x3=Logistic3x3.from_dict(data["logistic_3x3"]) if data.get("logistic_3x3") is not None else None,
             logistic_4x4=weights_4x4,
-            average_4x4=Plan.from_dict(data["average_4x4"]) if data.get("average_4x4") else None,
-            efforts=Efforts.from_dict(data["efforts"]) if data.get("efforts") else None,
+            average_4x4=Plan.from_dict(data["average_4x4"]) if data.get("average_4x4") is not None else None,
+            efforts=Efforts.from_dict(data["efforts"]) if data.get("efforts") is not None else None,
         )
 
 
@@ -562,8 +562,8 @@ class ModelConfig:
             name=str(data["name"]),
             provider=str(data["provider"]),
             model_id=str(data["model_id"]),
-            endpoint=EndpointConfig.from_dict(data["endpoint"]) if data.get("endpoint") else None,
-            tuning=TuningConfig.from_dict(data["tuning"]) if data.get("tuning") else None,
+            endpoint=EndpointConfig.from_dict(data["endpoint"]) if data.get("endpoint") is not None else None,
+            tuning=TuningConfig.from_dict(data["tuning"]) if data.get("tuning") is not None else None,
         )
         validate_model_config(cfg)
         return cfg
@@ -628,6 +628,8 @@ def validate_model_config(cfg: ModelConfig) -> None:
                 _check_prob(plan.gap.more_than, f"{prefix}.gap.more_than")
             if plan.boxes is not None:
                 b = plan.boxes
+                if not b.active_asks():
+                    raise ValueError(f"{prefix}.boxes must set at least one of whole, every, or windows")
                 _check_prob(b.exempt_from, f"{prefix}.boxes.exempt_from")
                 _check_prob(b.cover, f"{prefix}.boxes.cover")
                 _check_prob(b.inside, f"{prefix}.boxes.inside")

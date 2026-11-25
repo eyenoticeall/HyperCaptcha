@@ -23,6 +23,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
+from eval.dataset import UNIFORM_3X3_PICTURES
 from eval.schema import load_dataset, read_jsonl
 
 
@@ -154,9 +155,9 @@ def _managed_server(
             printed_url = line.removeprefix("Open ").strip()
             break
         err = proc.stderr.read().strip()
-        proc.wait()
+        rc = proc.wait()
         proc = None
-        last_err = err or line or f"server exited with code {proc}"
+        last_err = err or line or f"server exited with code {rc}"
         if flag == "--record" and "unexpected argument '--record'" in last_err:
             continue
         raise RuntimeError(f"hypercaptcha server failed to start: {last_err}")
@@ -294,7 +295,13 @@ def record_dataset(
                     "prompt": item["prompt"],
                     "image": encoded_img,
                 }
-                if inferred_service != "hcaptcha":
+                if inferred_service == "hcaptcha":
+                    pictures = item.get("pictures")
+                    if pictures is not None:
+                        body["pictures"] = pictures
+                    elif img_path.name.startswith("grid-"):
+                        body["pictures"] = [list(box) for box in UNIFORM_3X3_PICTURES]
+                else:
                     body["layout"] = item_layout
 
                 last_error = ""
