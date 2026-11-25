@@ -6,7 +6,7 @@
 
 **HyperCaptcha** is an open-source Rust and Python harness for solving and benchmarking **Google reCAPTCHA** and **hCaptcha** challenges with multimodal decision models — live in Camoufox or offline on saved grids with `hypercaptcha-eval`.
 
-> **Localhost research lab:** HyperCaptcha only serves pages on `127.0.0.1` for testing with your own CAPTCHA keys, vendor test keys, or saved offline grids — not third-party sites. See [SECURITY.md](SECURITY.md) · [Apache-2.0](LICENSE).
+> **Research use only:** HyperCaptcha is built for research and should not be used on third-party sites without permission. See [SECURITY.md](SECURITY.md) · [Apache-2.0](LICENSE).
 
 ---
 
