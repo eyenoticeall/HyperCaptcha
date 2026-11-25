@@ -91,6 +91,16 @@ pub enum Mode {
 }
 
 impl Mode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::V2 => "v2",
+            Self::V2Enterprise => "v2-enterprise",
+            Self::V3 => "v3",
+            Self::V3Enterprise => "v3-enterprise",
+            Self::PolicyChallenge => "policy-challenge",
+        }
+    }
+
     pub fn enterprise(self) -> bool {
         matches!(
             self,
@@ -111,7 +121,7 @@ pub struct Google {
     pub mode: Mode,
     pub site_key: String,
     pub test: bool,
-    hostname: String,
+    pub hostname: String,
     client: Client,
     auth: Auth,
 }
@@ -136,7 +146,9 @@ impl CloudCredentials {
         }
         configured_env("GOOGLE_CLOUD_ACCESS_TOKEN")
             .map(Self::AccessToken)
-            .context("set GOOGLE_CLOUD_API_KEY or GOOGLE_CLOUD_ACCESS_TOKEN")
+            .context(
+                "set GOOGLE_CLOUD_API_KEY or GOOGLE_CLOUD_ACCESS_TOKEN (e.g. GOOGLE_CLOUD_ACCESS_TOKEN=\"$(gcloud auth print-access-token)\")",
+            )
     }
 
     fn attach(&self, request: RequestBuilder) -> RequestBuilder {

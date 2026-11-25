@@ -92,7 +92,7 @@ async function init() {
     ? "hCaptcha public test key · Integration smoke test"
     : "Live verification with your hCaptcha key";
   byId("model-info").textContent = config.provider
-    ? `${config.provider} · ${config.model}`
+    ? (config.model_name || `${config.provider} · ${config.model}`)
     : "Start the server with --provider, --model, or --model-config to enable model requests.";
   await loadHcaptcha();
   startTrial();

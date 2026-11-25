@@ -14,6 +14,7 @@ use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
 
 use crate::{
     captcha::{Captcha, Service, hcaptcha::grid, recaptcha},
+    plan::Effort,
     providers::{Backend, Input, Output, Provider},
 };
 
@@ -106,6 +107,7 @@ pub fn serve(
     backend: Option<Backend>,
     log: Option<&Path>,
 ) -> Result<()> {
+    let summary = startup_summary(&captcha, backend.as_ref(), log);
     let log: Box<dyn Write> = match log {
         Some(path) => Box::new(open_log(path)?),
         None => Box::new(io::sink()),
@@ -124,6 +126,7 @@ pub fn serve(
         port,
     };
     println!("Open http://{}:{port}", lab.captcha.page_host());
+    eprintln!("{summary}");
     if let Some(backend) = &lab.backend {
         backend.keep_warm();
     }
@@ -154,11 +157,7 @@ impl Lab {
         // a name of its own at this machine.
         let host = format!("{}:{}", self.captcha.page_host(), self.port);
         if header(request, "Host") != Some(host.as_str()) {
-            let error = match self.captcha {
-                Captcha::Recaptcha(_) => "Open the localhost URL printed by the server.",
-                Captcha::Hcaptcha(_) => "Open the URL printed by the server.",
-            };
-            return json_response(403, json!({"error": error}));
+            return json_response(403, json!({"error": "Open the URL printed by the server."}));
         }
         if request.method() == &Method::Post {
             let origin = format!("http://{host}");
@@ -630,6 +629,31 @@ impl Lab {
             .context("Could not append the trial log.")?;
         Ok(serde_json::to_value(entry)?)
     }
+}
+
+fn startup_summary(captcha: &Captcha, backend: Option<&Backend>, log: Option<&Path>) -> String {
+    let mode = if captcha.test() {
+        format!("{} (test key)", captcha.mode_label())
+    } else {
+        captcha.mode_label().to_owned()
+    };
+    let model = backend.map_or("none", |backend| backend.name.as_str());
+    let effort = match backend {
+        Some(backend) if backend.is_record() => "record",
+        Some(backend) => backend.effort.map_or("none", Effort::as_str),
+        None => "none",
+    };
+    let log_path = log
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| "none".into());
+    format!(
+        "Config: service={} mode={} model={} effort={} log={}",
+        captcha.service().as_str(),
+        mode,
+        model,
+        effort,
+        log_path
+    )
 }
 
 fn decision_vision_result(backend: &Backend) -> Value {

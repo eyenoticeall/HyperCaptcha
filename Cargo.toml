@@ -3,7 +3,9 @@ name = "hypercaptcha"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.88"
-description = "Browser research harness for Google reCAPTCHA and model APIs"
+description = "Browser research harness for Google reCAPTCHA, hCaptcha, and multimodal model APIs"
+license = "Apache-2.0"
+readme = "README.md"
 
 [dependencies]
 anyhow = "1"

@@ -20,10 +20,23 @@ pub enum Effort {
     /// Low, and boxes drawn on the whole grid.
     Medium,
     /// Medium, and a second close-up pass.
+    #[default]
     High,
     /// High, and a box drawn in a window around every square.
-    #[default]
     Max,
+}
+
+impl Effort {
+    pub const ALL: [Self; 4] = [Self::Low, Self::Medium, Self::High, Self::Max];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::Max => "max",
+        }
+    }
 }
 
 /// One of the box requests a round can send.
@@ -366,5 +379,14 @@ mod tests {
         assert!(plan.validate(false).is_ok());
         let json = serde_json::to_value(&plan).unwrap();
         assert_eq!(json["close_ups"], serde_json::json!([null, 506]));
+    }
+
+    #[test]
+    fn default_effort_is_high() {
+        assert_eq!(Effort::default(), Effort::High);
+        assert_eq!(
+            Effort::ALL.map(Effort::as_str),
+            ["low", "medium", "high", "max"]
+        );
     }
 }

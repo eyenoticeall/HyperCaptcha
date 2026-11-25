@@ -110,9 +110,9 @@ pub struct EndpointConfig {
 pub struct WireProfile {
     pub dialect: WireDialect,
     pub base_url: String,
-    /// Environment variable that overrides `base_url` for built-in providers when not
-    /// overridden by CLI `--base-url` or an external `--model-config`.
-    pub base_url_env: Option<String>,
+    /// Environment variables checked in order to override `base_url` for built-in providers
+    /// when not overridden by CLI `--base-url` or an external `--model-config`.
+    pub base_url_envs: Vec<String>,
     /// Primary API key environment variable names checked in order.
     pub api_key_envs: Vec<String>,
     /// Optional environment variable holding comma-separated extra API keys for rotation.
@@ -138,7 +138,7 @@ impl WireProfile {
             Provider::Vllm => Self {
                 dialect: WireDialect::SystemOneAssets,
                 base_url: "https://app.vllm-sr.ai/v1".into(),
-                base_url_env: Some("VLLM_SR_BASE_URL".into()),
+                base_url_envs: vec!["VLLM_SR_BASE_URL".into()],
                 api_key_envs: vec!["VLLM_SR_API_KEY".into()],
                 extra_api_keys_env: Some("VLLM_SR_EXTRA_API_KEYS".into()),
                 image_format: DecisionImageFormat::Jpeg,
@@ -157,7 +157,7 @@ impl WireProfile {
             Provider::Liquid => Self {
                 dialect: WireDialect::SystemOneImages,
                 base_url: "https://api.liquid.ai/decisions/v1".into(),
-                base_url_env: Some("LIQUID_BASE_URL".into()),
+                base_url_envs: vec!["LIQUID_BASE_URL".into()],
                 api_key_envs: vec!["LIQUID_API_KEY".into()],
                 extra_api_keys_env: None,
                 image_format: DecisionImageFormat::Jpeg,
@@ -176,7 +176,7 @@ impl WireProfile {
             Provider::Jev => Self {
                 dialect: WireDialect::SystemOneAssets,
                 base_url: "https://api.typesafe.ai/v1".into(),
-                base_url_env: Some("JEV_BASE_URL".into()),
+                base_url_envs: vec!["TYPESAFE_BASE_URL".into(), "JEV_BASE_URL".into()],
                 api_key_envs: vec!["TYPESAFE_API_KEY".into(), "JEV_API_KEY".into()],
                 extra_api_keys_env: None,
                 image_format: DecisionImageFormat::Png,
@@ -225,7 +225,7 @@ impl WireProfile {
             Self {
                 dialect,
                 base_url,
-                base_url_env: None,
+                base_url_envs: Vec::new(),
                 api_key_envs: vec![api_key_env],
                 extra_api_keys_env: endpoint.extra_api_keys_env.clone(),
                 image_format: endpoint.image_format.unwrap_or(DecisionImageFormat::Jpeg),
@@ -599,8 +599,16 @@ impl Captcha {
     /// The name the lab page must be opened under. hCaptcha refuses pages on `localhost`.
     pub fn page_host(&self) -> &str {
         match self {
-            Self::Recaptcha(_) => "localhost",
+            Self::Recaptcha(google) => &google.hostname,
             Self::Hcaptcha(hcaptcha) => &hcaptcha.hostname,
+        }
+    }
+
+    /// Human-readable mode name for startup summaries and diagnostics.
+    pub fn mode_label(&self) -> &'static str {
+        match self {
+            Self::Recaptcha(google) => google.mode.as_str(),
+            Self::Hcaptcha(_) => "checkbox",
         }
     }
 
@@ -672,11 +680,15 @@ mod tests {
         assert_eq!(model.wire.dialect, WireDialect::SystemOneAssets);
         assert_eq!(model.wire.api_key_envs, vec!["MY_DECISION_API_KEY"]);
 
-        // Built-in Jev inherits both primary/fallback API key env vars and image header.
+        // Built-in Jev inherits both primary/fallback API key & base URL env vars and image header.
         let jev = recaptcha::PROFILE.named("typesafe/Jev").unwrap();
         assert_eq!(
             jev.wire.api_key_envs,
             vec!["TYPESAFE_API_KEY", "JEV_API_KEY"]
+        );
+        assert_eq!(
+            jev.wire.base_url_envs,
+            vec!["TYPESAFE_BASE_URL", "JEV_BASE_URL"]
         );
         assert_eq!(
             jev.wire
@@ -913,5 +925,13 @@ mod tests {
                 .max_images,
             1
         );
+    }
+
+    #[test]
+    fn recaptcha_page_host_returns_configured_hostname() {
+        let google =
+            recaptcha::Google::new(recaptcha::Mode::V2, true, "custom.localhost".into()).unwrap();
+        let captcha = Captcha::Recaptcha(google);
+        assert_eq!(captcha.page_host(), "custom.localhost");
     }
 }

@@ -14,7 +14,7 @@
 #
 # Each level's settings are the best-scoring ones found for the requests it sends, in a sweep
 # of about 18 million settings over 339 graded 4 x 4 grids: 311 labelled square by square and
-# 28 live grids graded afterwards, with the user's stricter corrections of 2026-11-17 on 42 of
+# 28 live grids graded afterwards, with stricter label corrections of 2026-11-17 on 42 of
 # them. The scores below are on those same grids, so they flatter the settings: selecting
 # from 55% on one pass was also what other grids chose out of fold, and the gains at high and
 # at max are within a few grids. Tokens are for one round on a prompt that allows skipping.
@@ -26,8 +26,8 @@
 # | high   | 12,351 | 281 (82.9%)  | 257 (82.6%)         |
 # | max    | 16,755 | 282 (83.2%)  | 258 (83.0%)         |
 #
-# The settings in use before the levels (both passes, select from 50%, a box of confidence
-# 0.3 from either request) scored 271. Commit 815afc4 rebuilds them.
+# The earlier single-configuration baseline (both passes, select from 50%, a box of
+# confidence 0.3 from either request) scored 271.
 
 schema_version = 1
 service = "recaptcha"

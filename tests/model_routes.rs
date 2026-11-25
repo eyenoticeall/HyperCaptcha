@@ -45,7 +45,10 @@ fn start_lab(mode: &str, provider: &str, api_base: &str, extra: &[&str]) -> (Lab
     // the test names a level or averages the scores, which has no levels.
     let mut extra = extra.to_vec();
     let averaged = extra.iter().any(|flag| {
-        flag.starts_with("--vllm-decision") || flag.starts_with("--vllm-whole-grid-weight")
+        flag.starts_with("--vllm-decision")
+            || flag.starts_with("--decision-rule")
+            || flag.starts_with("--vllm-whole-grid-weight")
+            || flag.starts_with("--whole-grid-weight")
     });
     if provider == "vllm" && !averaged && !extra.contains(&EFFORT) {
         extra.extend([EFFORT, "low"]);
@@ -571,9 +574,9 @@ fn decision_providers_preserve_scene_context_and_merge_crop_batches() {
 
 #[test]
 fn vllm_warms_a_rounds_connections_when_the_server_starts() {
-    // One practice request for each connection of the busiest round: the whole grid, the
-    // presence question, the two box requests and eight close-up requests. None is answered
-    // until all have arrived, so each must have a connection of its own.
+    // One practice request for each connection of the default (`high`) round: the whole grid,
+    // the presence question, the whole-grid box request and eight close-up requests. None is
+    // answered until all have arrived, so each must have a connection of its own.
     // The mock's thread pool sometimes leaves one of a burst of connections waiting for a free
     // thread, which never comes while the others are held. A fresh server is then tried.
     let mut attempt = 0;
@@ -582,10 +585,10 @@ fn vllm_warms_a_rounds_connections_when_the_server_starts() {
         let mock = Server::http("127.0.0.1:0").unwrap();
         let api_base = format!("http://{}/v1", mock.server_addr());
         let (process, _url) = spawn_lab("v2-enterprise", "vllm", &api_base, &[], false);
-        let requests: Vec<_> = (0..12)
+        let requests: Vec<_> = (0..11)
             .map_while(|_| mock.recv_timeout(Duration::from_secs(3)).unwrap())
             .collect();
-        if requests.len() == 12 {
+        if requests.len() == 11 {
             break (mock, process, requests);
         }
         assert!(
@@ -1351,7 +1354,7 @@ fn liquid_decides_4x4_grids_with_its_fitted_rule_and_averages_3x3_grids() {
         .json()
         .unwrap();
     assert_eq!(config["vllm_decision"], "logistic");
-    assert_eq!(config["effort"], "max");
+    assert_eq!(config["effort"], "high");
     assert_eq!(config["plan_4x4"]["close_ups"], json!([null, 506]));
     assert_eq!(config["plan_4x4"]["boxes"]["every"], 0.3);
     assert_eq!(config["plan_4x4"]["boxes"]["whole"], Value::Null);
@@ -1394,7 +1397,7 @@ fn liquid_decides_4x4_grids_with_its_fitted_rule_and_averages_3x3_grids() {
     assert_eq!(large["prediction"]["value"], json!([15, 16]));
     assert_eq!(large["vllm_components"]["rule"], "logistic");
     assert_eq!(large["decision_requests"], 11);
-    assert_eq!(large["effort"], "max");
+    assert_eq!(large["effort"], "high");
     // Squares 15 and 16 score over 90% and need no box. Square 14 does, and only the faint
     // box reaches it, so it is dropped.
     let boxes = &large["vllm_components"]["boxes"];
@@ -1538,7 +1541,7 @@ fn effort_and_tuned_settings_are_refused_where_nothing_was_measured() {
                 &["vllm", "--vllm-decision", "average", "--effort", "high"],
             ]
             .concat(),
-            "--effort applies to --vllm-decision logistic",
+            "--effort applies to --decision-rule logistic",
         ),
         (
             [
@@ -1551,7 +1554,7 @@ fn effort_and_tuned_settings_are_refused_where_nothing_was_measured() {
                 "max",
             ]
             .to_vec(),
-            "--effort applies to --vllm-decision logistic",
+            "--effort applies to --decision-rule logistic",
         ),
         (
             [
@@ -1559,7 +1562,7 @@ fn effort_and_tuned_settings_are_refused_where_nothing_was_measured() {
                 &["liquid", "--vllm-decision", "average", "--effort", "low"],
             ]
             .concat(),
-            "--effort applies to --vllm-decision logistic",
+            "--effort applies to --decision-rule logistic",
         ),
         (
             [&recaptcha[..], &["liquid", "--model", "d1"]].concat(),
@@ -1567,7 +1570,7 @@ fn effort_and_tuned_settings_are_refused_where_nothing_was_measured() {
         ),
         (
             [&recaptcha[..], &["vllm", "--record-4x4", "--effort", "max"]].concat(),
-            "--record-4x4 asks everything an effort level asks",
+            "--record asks everything an effort level asks",
         ),
         (
             [
@@ -1594,7 +1597,7 @@ fn effort_and_tuned_settings_are_refused_where_nothing_was_measured() {
                 &["vllm", "--effort", "low", "--vllm-box-wait"],
             ]
             .concat(),
-            "--vllm-box-wait needs a box rule",
+            "--box-wait needs a box rule",
         ),
     ] {
         let output = Command::new(env!("CARGO_BIN_EXE_hypercaptcha"))
@@ -3998,6 +4001,9 @@ fn server_creates_nested_log_dirs_and_reports_all_model_flags() {
         .text()
         .unwrap();
     assert!(recaptcha_js.contains("--provider, --model, or --model-config"));
+    assert!(recaptcha_js.contains("config.model_name"));
+    assert!(recaptcha_js.contains("config.supports_vision"));
+    assert!(!recaptcha_js.contains("config.provider !== \"openai-completions\""));
     assert!(recaptcha_js.contains("challengeButton.disabled = false;"));
     assert!(recaptcha_js.contains("let imageRounds = 0;"));
     drop(lab);
@@ -4040,4 +4046,677 @@ fn server_creates_nested_log_dirs_and_reports_all_model_flags() {
         .text()
         .unwrap();
     assert!(hcap_js.contains("--provider, --model, or --model-config"));
+    assert!(hcap_js.contains("config.model_name"));
+}
+
+#[test]
+fn smart_test_key_defaults_service_alias_and_startup_summary() {
+    // 1. `--google-test-key` without `--mode` defaults to reCAPTCHA `v2` and prints stdout line 1
+    //    `Open http://...` plus a 1-line active config summary on stderr.
+    {
+        let mut lab = LabProcess(
+            Command::new(env!("CARGO_BIN_EXE_hypercaptcha"))
+                .args(["serve", "--google-test-key", "--port", "0"])
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap(),
+        );
+        let mut stdout_line = String::new();
+        BufReader::new(lab.0.stdout.take().unwrap())
+            .read_line(&mut stdout_line)
+            .unwrap();
+        let url = stdout_line
+            .trim()
+            .strip_prefix("Open ")
+            .unwrap()
+            .to_string();
+        assert!(url.starts_with("http://localhost:"), "{url}");
+
+        let mut stderr_line = String::new();
+        BufReader::new(lab.0.stderr.take().unwrap())
+            .read_line(&mut stderr_line)
+            .unwrap();
+        assert!(
+            stderr_line.contains("service=recaptcha")
+                && stderr_line.contains("mode=v2 (test key)")
+                && stderr_line.contains("model=none")
+                && stderr_line.contains("effort=none")
+                && stderr_line.contains("log=none"),
+            "{stderr_line}"
+        );
+
+        let config: Value = Client::new()
+            .get(format!("{url}/config"))
+            .send()
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .unwrap();
+        assert_eq!(config["captcha"], "recaptcha");
+        assert_eq!(config["mode"], "v2");
+        assert_eq!(config["test"], true);
+    }
+
+    // 2. `--hcaptcha-test-key` without `--captcha`/`--service` defaults to hCaptcha, and
+    //    `--service hcaptcha` works as a visible alias.
+    for args in [
+        &["serve", "--hcaptcha-test-key", "--port", "0"][..],
+        &[
+            "serve",
+            "--service",
+            "hcaptcha",
+            "--hcaptcha-test-key",
+            "--port",
+            "0",
+        ][..],
+    ] {
+        let mut lab = LabProcess(
+            Command::new(env!("CARGO_BIN_EXE_hypercaptcha"))
+                .args(args)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap(),
+        );
+        let mut stdout_line = String::new();
+        BufReader::new(lab.0.stdout.take().unwrap())
+            .read_line(&mut stdout_line)
+            .unwrap();
+        let url = stdout_line
+            .trim()
+            .strip_prefix("Open ")
+            .unwrap()
+            .to_string();
+        let port: u16 = url
+            .strip_prefix("http://hypercaptcha.localhost:")
+            .unwrap()
+            .parse()
+            .unwrap();
+        let mut stderr_line = String::new();
+        BufReader::new(lab.0.stderr.take().unwrap())
+            .read_line(&mut stderr_line)
+            .unwrap();
+        assert!(
+            stderr_line.contains("service=hcaptcha")
+                && stderr_line.contains("mode=checkbox (test key)"),
+            "{args:?}: {stderr_line}"
+        );
+
+        let client = Client::builder()
+            .resolve("hypercaptcha.localhost", ([127, 0, 0, 1], port).into())
+            .build()
+            .unwrap();
+        let config: Value = client
+            .get(format!("{url}/config"))
+            .send()
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .unwrap();
+        assert_eq!(config["captcha"], "hcaptcha");
+        assert_eq!(config["test"], true);
+    }
+
+    // 3. Incompatible service/mode/test-key combinations still error clearly.
+    for (args, expected) in [
+        (
+            &["serve", "--google-test-key", "--mode", "v3"][..],
+            "--google-test-key requires --mode v2",
+        ),
+        (
+            &["serve", "--captcha", "recaptcha", "--hcaptcha-test-key"][..],
+            "--hcaptcha-test-key requires --captcha hcaptcha",
+        ),
+        (
+            &["serve", "--service", "recaptcha", "--hcaptcha-test-key"][..],
+            "--hcaptcha-test-key requires --captcha hcaptcha",
+        ),
+        (
+            &["serve", "--captcha", "hcaptcha", "--google-test-key"][..],
+            "--mode and --google-test-key apply to reCAPTCHA",
+        ),
+        (
+            &["serve", "--service", "hcaptcha", "--google-test-key"][..],
+            "--mode and --google-test-key apply to reCAPTCHA",
+        ),
+        (
+            &["serve", "--google-test-key", "--hcaptcha-test-key"][..],
+            "--mode and --google-test-key apply to reCAPTCHA",
+        ),
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_hypercaptcha"))
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "{args:?} unexpectedly succeeded");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains(expected), "{args:?}: {stderr}");
+    }
+}
+
+#[test]
+fn offline_models_and_validate_config_subcommands_work_without_api_keys() {
+    // 1. `hypercaptcha models` works offline with an empty environment.
+    let table = Command::new(env!("CARGO_BIN_EXE_hypercaptcha"))
+        .arg("models")
+        .env_clear()
+        .output()
+        .unwrap();
+    assert!(
+        table.status.success(),
+        "{}",
+        String::from_utf8_lossy(&table.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&table.stdout);
+    for needle in [
+        "vLLM/d3-ultra",
+        "typesafe/Jev",
+        "Liquid/d1.2",
+        "Liquid/d1.2-ultra",
+        "VLLM_SR_API_KEY",
+        "TYPESAFE_API_KEY or JEV_API_KEY",
+        "LIQUID_API_KEY",
+        "high (default)",
+        "recaptcha",
+        "hcaptcha",
+    ] {
+        assert!(stdout.contains(needle), "missing {needle:?} in:\n{stdout}");
+    }
+
+    // 2. `--json` + `--service` and `--captcha` filtering.
+    let all_json_out = Command::new(env!("CARGO_BIN_EXE_hypercaptcha"))
+        .args(["models", "--json"])
+        .env_clear()
+        .output()
+        .unwrap();
+    assert!(all_json_out.status.success());
+    let all_json: Value = serde_json::from_slice(&all_json_out.stdout).unwrap();
+    let items = all_json.as_array().unwrap();
+    assert_eq!(items.len(), 5);
+    let vllm_rec = items
+        .iter()
+        .find(|item| item["service"] == "recaptcha" && item["name"] == "vLLM/d3-ultra")
+        .unwrap();
+    assert_eq!(vllm_rec["provider"], "vllm");
+    assert_eq!(vllm_rec["model_id"], "vllm-sr/d3-ultra");
+    assert_eq!(vllm_rec["required_env"], json!(["VLLM_SR_API_KEY"]));
+    assert_eq!(vllm_rec["default_decision"], "logistic");
+    assert_eq!(vllm_rec["efforts"], json!(["low", "medium", "high", "max"]));
+    assert_eq!(vllm_rec["default_effort"], "high");
+
+    let rec_only: Value = serde_json::from_slice(
+        &Command::new(env!("CARGO_BIN_EXE_hypercaptcha"))
+            .args(["models", "--service", "recaptcha", "--json"])
+            .env_clear()
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap();
+    assert_eq!(rec_only.as_array().unwrap().len(), 4);
+    assert!(
+        rec_only
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|item| item["service"] == "recaptcha")
+    );
+
+    let hcap_only: Value = serde_json::from_slice(
+        &Command::new(env!("CARGO_BIN_EXE_hypercaptcha"))
+            .args(["models", "--captcha", "hcaptcha", "--json"])
+            .env_clear()
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap();
+    assert_eq!(hcap_only.as_array().unwrap().len(), 1);
+    assert_eq!(hcap_only[0]["service"], "hcaptcha");
+    assert_eq!(hcap_only[0]["default_decision"], "average");
+    assert_eq!(hcap_only[0]["efforts"], json!([]));
+    assert_eq!(hcap_only[0]["default_effort"], Value::Null);
+
+    // 3. `hypercaptcha validate-config` validates all shipped configs offline.
+    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let shipped = [
+        "models/recaptcha/vllm/d3-ultra.toml",
+        "models/recaptcha/typesafe/jev.toml",
+        "models/recaptcha/liquid/d1.2.toml",
+        "models/recaptcha/liquid/d1.2-ultra.toml",
+        "models/hcaptcha/vllm/d3-ultra.toml",
+        "models/examples/custom-decision-model.toml",
+    ];
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_hypercaptcha"));
+    cmd.arg("validate-config").env_clear();
+    for rel in shipped {
+        cmd.arg(manifest_dir.join(rel));
+    }
+    let valid_out = cmd.output().unwrap();
+    assert!(
+        valid_out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&valid_out.stderr)
+    );
+    let valid_stdout = String::from_utf8_lossy(&valid_out.stdout);
+    assert_eq!(valid_stdout.lines().count(), shipped.len());
+    for line in valid_stdout.lines() {
+        assert!(line.starts_with("OK "), "{line}");
+    }
+
+    // 4. Invalid + missing configs exit non-zero while still reporting valid ones.
+    let bad_cfg = TempFile::write(
+        "validate-bad.toml",
+        "schema_version = 99\nservice = \"recaptcha\"\nname = \"Bad/model\"\nprovider = \"vllm\"\nmodel_id = \"bad\"\n",
+    );
+    let missing_cfg =
+        std::env::temp_dir().join(format!("hypercaptcha-missing-{}.toml", std::process::id()));
+    let mixed = Command::new(env!("CARGO_BIN_EXE_hypercaptcha"))
+        .arg("validate-config")
+        .arg(manifest_dir.join("models/recaptcha/vllm/d3-ultra.toml"))
+        .arg(&bad_cfg.0)
+        .arg(&missing_cfg)
+        .env_clear()
+        .output()
+        .unwrap();
+    assert!(!mixed.status.success());
+    let mixed_stdout = String::from_utf8_lossy(&mixed.stdout);
+    let mixed_stderr = String::from_utf8_lossy(&mixed.stderr);
+    assert!(mixed_stdout.contains("OK "), "{mixed_stdout}");
+    assert!(
+        mixed_stderr.contains("schema_version")
+            && mixed_stderr.contains("2 of 3 model config(s) failed validation"),
+        "{mixed_stderr}"
+    );
+}
+
+#[test]
+fn env_file_is_opt_in_and_respects_precedence_and_hides_secrets() {
+    let root =
+        std::env::temp_dir().join(format!("hypercaptcha-env-file-test-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+
+    // 1. A `.env` file in the current directory is NOT loaded unless `--env-file` is passed.
+    let dot_env = root.join(".env");
+    std::fs::write(
+        &dot_env,
+        "RECAPTCHA_SITE_KEY=autoload-site\nRECAPTCHA_SECRET_KEY=autoload-secret\n",
+    )
+    .unwrap();
+    let without_flag = Command::new(env!("CARGO_BIN_EXE_hypercaptcha"))
+        .args(["serve", "--mode", "v2", "--port", "0"])
+        .current_dir(&root)
+        .env_remove("RECAPTCHA_SITE_KEY")
+        .env_remove("RECAPTCHA_SECRET_KEY")
+        .output()
+        .unwrap();
+    assert!(!without_flag.status.success());
+    assert!(
+        String::from_utf8_lossy(&without_flag.stderr).contains("set RECAPTCHA_SITE_KEY"),
+        "{}",
+        String::from_utf8_lossy(&without_flag.stderr)
+    );
+
+    // 2. Multiple `--env-file` flags: later file overrides earlier file, and process env wins
+    //    over both. Secrets are never printed to stdout or stderr.
+    let first_env = root.join("first.env");
+    let second_env = root.join("second.env");
+    std::fs::write(
+        &first_env,
+        "# First env file\n\
+         RECAPTCHA_SITE_KEY=site-from-first\n\
+         export RECAPTCHA_SECRET_KEY='secret-from-first'\n\
+         VLLM_SR_API_KEY=\"vllm-secret-first\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        &second_env,
+        "export RECAPTCHA_SITE_KEY=\"site-from-second\" # inline comment\n\
+         VLLM_SR_API_KEY='vllm-secret-second'\n",
+    )
+    .unwrap();
+
+    // Mock endpoint checks that the Bearer token came from `second.env` (`vllm-secret-second`),
+    // while `RECAPTCHA_SITE_KEY` came from process env (`site-from-proc`), and `RECAPTCHA_SECRET_KEY`
+    // came from `first.env`.
+    let mock = Server::http("127.0.0.1:0").unwrap();
+    let api_base = format!("http://{}/v1", mock.server_addr());
+    let server = thread::spawn(move || {
+        for index in 0..2 {
+            let request = mock.recv_timeout(Duration::from_secs(5)).unwrap().unwrap();
+            assert!(request.headers().iter().any(|header| {
+                header.field.equiv("Authorization")
+                    && header.value.as_str() == "Bearer vllm-secret-second"
+            }));
+            request
+                .respond(Response::from_string(
+                    json!({
+                        "model": "vllm-sr/d3-ultra",
+                        "answers": {"red": {"noul": if index == 0 { 0.99 } else { 0.01 }}},
+                        "usage": {"input_tokens": 10, "output_tokens": 0},
+                    })
+                    .to_string(),
+                ))
+                .unwrap();
+        }
+    });
+
+    let mut lab = LabProcess(
+        Command::new(env!("CARGO_BIN_EXE_hypercaptcha"))
+            .args([
+                "serve",
+                "--mode",
+                "v2",
+                "--port",
+                "0",
+                "--env-file",
+                first_env.to_str().unwrap(),
+                "--env-file",
+                second_env.to_str().unwrap(),
+                "--model",
+                "vLLM/d3-ultra",
+                "--base-url",
+                &api_base,
+                "--cold-connections",
+            ])
+            .env("RECAPTCHA_SITE_KEY", "site-from-proc")
+            .env_remove("RECAPTCHA_SECRET_KEY")
+            .env_remove("VLLM_SR_API_KEY")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    let mut stdout_line = String::new();
+    BufReader::new(lab.0.stdout.take().unwrap())
+        .read_line(&mut stdout_line)
+        .unwrap();
+    let url = stdout_line
+        .trim()
+        .strip_prefix("Open ")
+        .unwrap()
+        .to_string();
+    let mut stderr_line = String::new();
+    BufReader::new(lab.0.stderr.take().unwrap())
+        .read_line(&mut stderr_line)
+        .unwrap();
+    assert!(
+        stderr_line.contains("service=recaptcha")
+            && stderr_line.contains("mode=v2")
+            && stderr_line.contains("model=vLLM/d3-ultra")
+            && stderr_line.contains("effort=high"),
+        "{stderr_line}"
+    );
+    for secret in [
+        "secret-from-first",
+        "vllm-secret-first",
+        "vllm-secret-second",
+    ] {
+        assert!(!stderr_line.contains(secret), "leaked secret in stderr");
+        assert!(!stdout_line.contains(secret), "leaked secret in stdout");
+    }
+
+    let client = Client::new();
+    let config: Value = client
+        .get(format!("{url}/config"))
+        .send()
+        .unwrap()
+        .json()
+        .unwrap();
+    assert_eq!(config["site_key"], "site-from-proc");
+    assert_eq!(config["effort"], "high");
+    assert_eq!(config["plan_4x4"]["boxes"]["whole"], 0.3);
+    assert_eq!(config["plan_4x4"]["boxes"]["windows"], Value::Null);
+
+    let check: Value = client
+        .post(format!("{url}/vision-check"))
+        .header("Origin", &url)
+        .json(&json!({"trial_id": "env-file-check", "source": "camoufox"}))
+        .send()
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .unwrap();
+    server.join().unwrap();
+    assert_eq!(check["result"]["passed"], true);
+
+    // 3. Malformed `--env-file` fails cleanly without printing the secret value.
+    let bad_env = root.join("bad.env");
+    std::fs::write(
+        &bad_env,
+        "VLLM_SR_API_KEY=\"unterminated-top-secret-value\n",
+    )
+    .unwrap();
+    let bad_out = Command::new(env!("CARGO_BIN_EXE_hypercaptcha"))
+        .args([
+            "serve",
+            "--google-test-key",
+            "--env-file",
+            bad_env.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(!bad_out.status.success());
+    let bad_stderr = String::from_utf8_lossy(&bad_out.stderr);
+    assert!(!bad_stderr.contains("top-secret-value"), "{bad_stderr}");
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn help_hides_legacy_aliases_and_custom_hostname_works_for_recaptcha() {
+    // 1. `serve --help` hides legacy `--vllm-*` and `--record-4x4` aliases while showing
+    //    `--service`, `--env-file`, canonical flags, and `Defaults to high`.
+    let help = Command::new(env!("CARGO_BIN_EXE_hypercaptcha"))
+        .args(["serve", "--help"])
+        .output()
+        .unwrap();
+    assert!(help.status.success());
+    let text = String::from_utf8_lossy(&help.stdout);
+    for hidden in [
+        "--vllm-whole-grid-weight-3x3",
+        "--vllm-whole-grid-weight-4x4",
+        "--vllm-decision",
+        "--vllm-box-wait",
+        "--vllm-close-ups-per-request",
+        "--vllm-cold-connections",
+        "--record-4x4",
+    ] {
+        assert!(
+            !text.contains(hidden),
+            "legacy alias {hidden} shown in --help"
+        );
+    }
+    for visible in [
+        "--service",
+        "--env-file",
+        "--decision-rule",
+        "--whole-grid-weight-3x3",
+        "--whole-grid-weight-4x4",
+        "--box-wait",
+        "--close-ups-per-request",
+        "--cold-connections",
+        "--record",
+        "Defaults to high",
+    ] {
+        assert!(
+            text.contains(visible),
+            "missing {visible} in --help:\n{text}"
+        );
+    }
+
+    // 2. Hidden legacy aliases still parse silently and configure the backend identically.
+    let mut legacy_lab = LabProcess(
+        Command::new(env!("CARGO_BIN_EXE_hypercaptcha"))
+            .args([
+                "serve",
+                "--google-test-key",
+                "--port",
+                "0",
+                "--provider",
+                "vllm",
+                "--vllm-decision",
+                "average",
+                "--vllm-whole-grid-weight-3x3",
+                "0.4",
+                "--vllm-cold-connections",
+            ])
+            .env("VLLM_SR_API_KEY", "test-vllm-key")
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    let mut line = String::new();
+    BufReader::new(legacy_lab.0.stdout.take().unwrap())
+        .read_line(&mut line)
+        .unwrap();
+    let url = line.trim().strip_prefix("Open ").unwrap().to_string();
+    let cfg: Value = Client::new()
+        .get(format!("{url}/config"))
+        .send()
+        .unwrap()
+        .json()
+        .unwrap();
+    assert_eq!(cfg["vllm_decision"], "average");
+    assert_eq!(cfg["vllm_whole_grid_weight_3x3"], 0.4);
+    drop(legacy_lab);
+
+    // 3. Custom `--hostname` on reCAPTCHA is printed, accepted on Host header, and rejects localhost
+    //    with the generic hint `"Open the URL printed by the server."`.
+    let mut host_lab = LabProcess(
+        Command::new(env!("CARGO_BIN_EXE_hypercaptcha"))
+            .args([
+                "serve",
+                "--google-test-key",
+                "--hostname",
+                "custom.localhost",
+                "--port",
+                "0",
+            ])
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    let mut line = String::new();
+    BufReader::new(host_lab.0.stdout.take().unwrap())
+        .read_line(&mut line)
+        .unwrap();
+    let custom_url = line.trim().strip_prefix("Open ").unwrap().to_string();
+    let port: u16 = custom_url
+        .strip_prefix("http://custom.localhost:")
+        .unwrap()
+        .parse()
+        .unwrap();
+
+    let refused = Client::new()
+        .get(format!("http://localhost:{port}/config"))
+        .send()
+        .unwrap();
+    assert_eq!(refused.status(), 403);
+    let refused_json: Value = refused.json().unwrap();
+    assert_eq!(refused_json["error"], "Open the URL printed by the server.");
+
+    let custom_client = Client::builder()
+        .resolve("custom.localhost", ([127, 0, 0, 1], port).into())
+        .build()
+        .unwrap();
+    let ok: Value = custom_client
+        .get(format!("{custom_url}/config"))
+        .send()
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .unwrap();
+    assert_eq!(ok["captcha"], "recaptcha");
+    assert_eq!(ok["mode"], "v2");
+}
+
+#[test]
+fn enterprise_auth_hint_and_typesafe_base_url_precedence() {
+    // 1. Missing Google Cloud credentials error mentions `gcloud auth print-access-token`.
+    let missing_cloud = Command::new(env!("CARGO_BIN_EXE_hypercaptcha"))
+        .args(["serve", "--mode", "v2-enterprise", "--port", "0"])
+        .env("RECAPTCHA_SITE_KEY", "test-site")
+        .env("GOOGLE_CLOUD_PROJECT", "test-project")
+        .env_remove("GOOGLE_CLOUD_API_KEY")
+        .env_remove("GOOGLE_CLOUD_ACCESS_TOKEN")
+        .output()
+        .unwrap();
+    assert!(!missing_cloud.status.success());
+    let stderr = String::from_utf8_lossy(&missing_cloud.stderr);
+    assert!(
+        stderr.contains("gcloud auth print-access-token"),
+        "{stderr}"
+    );
+
+    // 2. `TYPESAFE_BASE_URL` is checked before `JEV_BASE_URL`, and `JEV_BASE_URL` still works as
+    //    fallback when `TYPESAFE_BASE_URL` is unset.
+    for use_typesafe in [true, false] {
+        let mock = Server::http("127.0.0.1:0").unwrap();
+        let mock_base = format!("http://{}/v1", mock.server_addr());
+        let server = thread::spawn(move || {
+            for index in 0..2 {
+                let request = mock.recv_timeout(Duration::from_secs(5)).unwrap().unwrap();
+                assert_eq!(request.url(), "/v1/systemone");
+                request
+                    .respond(Response::from_string(
+                        json!({
+                            "model": "jev-latest",
+                            "answers": {"red": {"type": "noul", "noul": if index == 0 { 0.99 } else { 0.01 }}},
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap();
+            }
+        });
+
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_hypercaptcha"));
+        cmd.args([
+            "serve",
+            "--google-test-key",
+            "--port",
+            "0",
+            "--provider",
+            "jev",
+            "--timeout",
+            "3",
+        ])
+        .env("TYPESAFE_API_KEY", "test-jev-key")
+        .stdout(Stdio::piped());
+        if use_typesafe {
+            cmd.env("TYPESAFE_BASE_URL", &mock_base)
+                .env("JEV_BASE_URL", "http://127.0.0.1:9/v1");
+        } else {
+            cmd.env_remove("TYPESAFE_BASE_URL")
+                .env("JEV_BASE_URL", &mock_base);
+        }
+        let mut lab = LabProcess(cmd.spawn().unwrap());
+        let mut line = String::new();
+        BufReader::new(lab.0.stdout.take().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        let url = line.trim().strip_prefix("Open ").unwrap().to_string();
+
+        let check: Value = Client::new()
+            .post(format!("{url}/vision-check"))
+            .header("Origin", &url)
+            .json(&json!({"trial_id": "typesafe-base-url", "source": "camoufox"}))
+            .send()
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .unwrap();
+        server.join().unwrap();
+        assert_eq!(
+            check["result"]["passed"], true,
+            "use_typesafe={use_typesafe}"
+        );
+    }
 }

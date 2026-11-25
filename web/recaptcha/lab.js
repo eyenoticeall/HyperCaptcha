@@ -254,10 +254,10 @@ async function init() {
     : `reCAPTCHA ${version}${config.enterprise ? " Enterprise" : ""}`;
   byId("context").textContent = config.test ? "Google public test key · Integration smoke test" : "Live verification with your Google key";
   byId("model-info").textContent = config.provider
-    ? `${config.provider} · ${config.model}`
+    ? (config.model_name || `${config.provider} · ${config.model}`)
     : "Start the server with --provider, --model, or --model-config to enable model requests.";
   syncPromptPlaceholder();
-  const vision = !config.score_based && !config.test && config.provider && config.provider !== "openai-completions";
+  const vision = Boolean(!config.score_based && !config.test && config.provider && config.supports_vision);
   if (companionTrial) {
     document.body.classList.add("companion-only");
     trialId = companionTrial;
@@ -309,7 +309,7 @@ async function init() {
   byId("companion").hidden = !vision;
   if (vision) {
     byId("model-info").textContent += " · Apply the selected tiles in the Google challenge.";
-  } else if (!config.score_based && config.provider === "openai-completions") {
+  } else if (!config.score_based && config.provider && !config.supports_vision) {
     byId("model-info").textContent += " · Choose a vision backend for image challenges.";
   }
 }

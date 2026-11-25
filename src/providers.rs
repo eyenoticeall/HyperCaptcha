@@ -1,6 +1,5 @@
 use std::{
     collections::BTreeMap,
-    env,
     io::{Cursor, Write},
     ops::Range,
     path::PathBuf,
@@ -85,15 +84,15 @@ pub struct ProviderOptions {
     tile_threshold: Option<f64>,
 
     /// Whole-grid weight on 3 × 3 grids for two-view decision providers. The remainder goes to the crop scores.
-    #[arg(long, visible_alias = "vllm-whole-grid-weight-3x3", value_parser = crate::parse_probability)]
+    #[arg(long, alias = "vllm-whole-grid-weight-3x3", value_parser = crate::parse_probability)]
     whole_grid_weight_3x3: Option<f64>,
 
     /// Whole-grid weight on 4 × 4 grids for two-view decision providers. The remainder goes to the crop scores.
-    #[arg(long, visible_alias = "vllm-whole-grid-weight-4x4", value_parser = crate::parse_probability)]
+    #[arg(long, alias = "vllm-whole-grid-weight-4x4", value_parser = crate::parse_probability)]
     whole_grid_weight_4x4: Option<f64>,
 
     /// How a two-view decision provider combines whole-grid and crop scores for each tile. Defaults to the model config's rule, or average when a whole-grid weight is set.
-    #[arg(long, visible_alias = "vllm-decision", value_enum)]
+    #[arg(long, alias = "vllm-decision", value_enum)]
     decision_rule: Option<VllmDecision>,
 
     /// Image input strategy for Jev checkbox challenges.
@@ -116,24 +115,24 @@ pub struct ProviderOptions {
     #[arg(long, value_parser = clap::value_parser!(u32).range(280..=1568))]
     grid_max_side_4x4: Option<u32>,
 
-    /// How much a two-view decision provider asks about a 4 × 4 grid. Each level sends more requests than the one below it and costs more tokens: low sends the whole grid, one close-up pass and the skip question; medium adds boxes drawn on the whole grid; high adds a second close-up pass; max adds a box drawn around every square. Each level decides with the settings measured for it. Defaults to max. Applies to the logistic decision rule.
+    /// How much a two-view decision provider asks about a 4 × 4 grid. Each level sends more requests than the one below it and costs more tokens: low sends the whole grid, one close-up pass and the skip question; medium adds boxes drawn on the whole grid; high adds a second close-up pass; max adds a box drawn around every square. Each level decides with the settings measured for it. Defaults to high. Applies to the logistic decision rule.
     #[arg(long, value_enum)]
     effort: Option<Effort>,
 
     /// Wait for every box reply in a 4 × 4 round and log every box, instead of answering as soon as the selection is settled. For checking the box rule, at an effort level that has one.
-    #[arg(long, visible_alias = "vllm-box-wait")]
+    #[arg(long, alias = "vllm-box-wait")]
     box_wait: bool,
 
     /// The most close-ups a two-view decision provider puts in one request, from 2 to 9. Defaults to 4. Smaller groups mean more parallel requests with the same scores, but a larger upload.
-    #[arg(long, visible_alias = "vllm-close-ups-per-request", value_parser = clap::value_parser!(u8).range(2..=9))]
+    #[arg(long, alias = "vllm-close-ups-per-request", value_parser = clap::value_parser!(u8).range(2..=9))]
     close_ups_per_request: Option<u8>,
 
     /// Do not open connections ahead of a round or keep them open between rounds.
-    #[arg(long, visible_alias = "vllm-cold-connections")]
+    #[arg(long, alias = "vllm-cold-connections")]
     cold_connections: bool,
 
     /// Ask a 4 × 4 round everything any effort level asks, wait for every reply and log it, and decide as a plain round does: both close-up passes, the skip question and every supported box request, none of which changes the answer. For recording a model's answers so that settings can be measured for it.
-    #[arg(long, visible_alias = "record-4x4")]
+    #[arg(long, alias = "record-4x4")]
     record: bool,
 }
 
@@ -191,6 +190,18 @@ impl Provider {
             Self::Custom => "Custom",
         }
     }
+
+    /// Canonical CLI/TOML identifier for the provider.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::OpenaiChat => "openai-chat",
+            Self::OpenaiCompletions => "openai-completions",
+            Self::Jev => "jev",
+            Self::Vllm => "vllm",
+            Self::Liquid => "liquid",
+            Self::Custom => "custom",
+        }
+    }
 }
 
 /// Rules for combining whole-grid and crop answers.
@@ -201,6 +212,15 @@ pub enum VllmDecision {
     Average,
     /// Logistic model on log-odds, fitted to labelled live grids. 4 × 4 adds neighbouring-square evidence.
     Logistic,
+}
+
+impl VllmDecision {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Average => "average",
+            Self::Logistic => "logistic",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
@@ -342,7 +362,7 @@ impl Backend {
         );
         ensure!(
             options.decision_rule.is_none() || options.provider.is_some_and(Provider::asks_twice),
-            "--decision-rule / --vllm-decision requires --provider vllm, liquid, or custom"
+            "--decision-rule requires --provider vllm, liquid, or custom"
         );
         ensure!(
             options.decision_rule != Some(VllmDecision::Logistic)
@@ -356,7 +376,7 @@ impl Backend {
         );
         ensure!(
             !options.box_wait || options.provider.is_some_and(Provider::asks_twice),
-            "--box-wait / --vllm-box-wait requires --provider vllm, liquid, or custom"
+            "--box-wait requires --provider vllm, liquid, or custom"
         );
         ensure!(
             options.close_ups_per_request.is_none()
@@ -365,15 +385,15 @@ impl Backend {
         );
         ensure!(
             !options.record || options.provider.is_some_and(Provider::is_decision),
-            "--record / --record-4x4 requires a decision provider"
+            "--record requires a decision provider"
         );
         ensure!(
             !options.record || options.effort.is_none(),
-            "--record / --record-4x4 asks everything an effort level asks, so it takes no --effort"
+            "--record asks everything an effort level asks, so it takes no --effort"
         );
         ensure!(
             !options.cold_connections || options.provider.is_some_and(Provider::asks_twice),
-            "--cold-connections / --vllm-cold-connections requires --provider vllm, liquid, or custom"
+            "--cold-connections requires --provider vllm, liquid, or custom"
         );
         ensure!(
             options.jev_vision.is_none() || options.provider == Some(Provider::Jev),
@@ -469,7 +489,11 @@ impl Backend {
             let base = options
                 .base_url
                 .or(explicit_base_url)
-                .or_else(|| wire.base_url_env.as_deref().and_then(configured_env))
+                .or_else(|| {
+                    wire.base_url_envs
+                        .iter()
+                        .find_map(|env_name| configured_env(env_name))
+                })
                 .unwrap_or_else(|| wire.base_url.clone());
             let url = endpoint_url(&base, "systemone")?;
             let key = wire
@@ -590,7 +614,7 @@ impl Backend {
                 (Some(tuned), _) => {
                     ensure!(
                         options.effort.is_none(),
-                        "--effort applies to --vllm-decision logistic (or --decision-rule logistic)"
+                        "--effort applies to --decision-rule logistic"
                     );
                     (None, tuned.average_4x4.clone())
                 }
@@ -604,7 +628,7 @@ impl Backend {
                 (None, _) => {
                     ensure!(
                         options.effort.is_none(),
-                        "--effort applies to --vllm-decision logistic (or --decision-rule logistic)"
+                        "--effort applies to --decision-rule logistic"
                     );
                     (None, Plan::plain())
                 }
@@ -665,7 +689,7 @@ impl Backend {
                         .as_ref()
                         .is_some_and(|tuned| tuned.logistic_3x3.is_some()),
                 }),
-            "--decision-rule / --vllm-decision logistic has not been fitted for this CAPTCHA service"
+            "--decision-rule logistic has not been fitted for this CAPTCHA service"
         );
         ensure!(
             supports_every_box || backend.plan.boxes.is_none_or(|rule| rule.every.is_none()),
@@ -674,7 +698,7 @@ impl Backend {
         );
         ensure!(
             !backend.vllm_box_wait || backend.plan.boxes.is_some(),
-            "--box-wait / --vllm-box-wait needs a box rule: --effort medium, high or max with the logistic decision"
+            "--box-wait needs a box rule: --effort medium, high or max with the logistic decision"
         );
         if backend.wire.as_ref().is_some_and(|w| w.warm_connections) {
             // The busiest round is a 4 × 4 grid with the presence question and its box requests.
@@ -770,6 +794,11 @@ impl Backend {
     pub fn plan_4x4(&self) -> Option<&Plan> {
         ((self.provider.asks_twice() || self.record) && self.profile.layouts.contains(&4))
             .then_some(&self.plan)
+    }
+
+    /// Whether the backend is running in `--record` mode.
+    pub fn is_record(&self) -> bool {
+        self.record
     }
 
     pub fn decision_image_format(&self) -> Option<DecisionImageFormat> {
@@ -1907,7 +1936,7 @@ impl Keeper {
 }
 
 pub fn configured_env(name: &str) -> Option<String> {
-    env::var(name).ok().filter(|value| !value.trim().is_empty())
+    crate::envfile::lookup(name)
 }
 
 pub fn validate_base_url(base: &str) -> Result<()> {
@@ -2819,7 +2848,7 @@ mod tests {
             "467",
         ]);
         // SAFETY: tests run single-threaded with respect to this variable's readers below.
-        unsafe { env::set_var("VLLM_SR_API_KEY", "test-key") };
+        unsafe { std::env::set_var("VLLM_SR_API_KEY", "test-key") };
         let backend = Backend::new(options, &crate::captcha::recaptcha::PROFILE)
             .unwrap()
             .unwrap();
@@ -3035,8 +3064,7 @@ mod tests {
         }
     }
 
-    // vLLM/d3-ultra on 644 grids: the 311 labelled, and 333 live ones
-    // (reports/labels/next/boxgrid/tok_v2_fixture.py writes the file).
+    // vLLM/d3-ultra on 644 grids: 311 labelled and 333 live grids recorded in the fixture.
     #[test]
     fn each_effort_level_selects_what_was_measured_on_the_recorded_grids() {
         levels_select_what_was_measured(
@@ -3047,9 +3075,9 @@ mod tests {
         );
     }
 
-    // Liquid's models on the first of three recorded passes over the 339 graded grids
-    // (reports/labels/next/boxgrid/liquid/chosen.py writes the files). Liquid does not answer a
-    // request the same way twice, so these recordings are the only way to check its levels.
+    // Liquid's models on the first of three recorded passes over the 339 graded grids.
+    // Liquid does not answer a request the same way twice, so these recordings are the only
+    // way to check its levels.
     #[test]
     fn liquid_d1_2_levels_select_what_was_measured() {
         levels_select_what_was_measured(

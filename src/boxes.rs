@@ -856,8 +856,8 @@ mod tests {
     }
 
     /// Checks every picture against the lengths and hashes that Pillow produced for the same
-    /// grids. Needs the reference file, so it runs only when asked:
-    /// `HYPERCAPTCHA_BOX_REFERENCE=reports/box-live/integrate/ref.json cargo test -- --ignored`
+    /// grids. Needs a reference JSON file, so it runs only when asked:
+    /// `HYPERCAPTCHA_BOX_REFERENCE=path/to/box-reference.json cargo test -- --ignored`
     #[test]
     #[ignore]
     fn pictures_match_pillow_byte_for_byte() {
