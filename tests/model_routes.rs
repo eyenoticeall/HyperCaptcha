@@ -297,7 +297,13 @@ fn model_routes_use_the_correct_wire_formats() {
         if is_grid {
             let mut grid = tiny_skia::Pixmap::new(320, 320).unwrap();
             if split {
-                for (index, pixel) in grid.data_mut().chunks_exact_mut(4).enumerate() {
+                for (index, pixel) in grid
+                    .data_mut()
+                    .as_chunks_mut::<4>()
+                    .0
+                    .iter_mut()
+                    .enumerate()
+                {
                     let tile = ((index / 320) / 80) * 4 + ((index % 320) / 80) + 1;
                     pixel.copy_from_slice(&[(tile * 10) as u8, 0, 0, 255]);
                 }

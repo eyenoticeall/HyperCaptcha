@@ -274,7 +274,7 @@ fn forward_dct(data: &mut [i32; 64]) {
         // Outputs 7, 5, 3, 1 before scaling.
         [t4 + z1 + z3, t5 + z2 + z4, t6 + z2 + z3, t7 + z1 + z4]
     };
-    for row in data.chunks_exact_mut(8) {
+    for row in data.as_chunks_mut::<8>().0 {
         let (t0, t7) = (row[0] + row[7], row[0] - row[7]);
         let (t1, t6) = (row[1] + row[6], row[1] - row[6]);
         let (t2, t5) = (row[2] + row[5], row[2] - row[5]);
@@ -443,7 +443,7 @@ fn encode_jpeg(image: &Rgb) -> Vec<u8> {
         Vec::with_capacity(pixels),
         Vec::with_capacity(pixels),
     );
-    for pixel in image.data.chunks_exact(3) {
+    for pixel in image.data.as_chunks::<3>().0 {
         let (r, g, b) = (
             i32::from(pixel[0]),
             i32::from(pixel[1]),

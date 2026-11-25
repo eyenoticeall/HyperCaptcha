@@ -2288,7 +2288,9 @@ pub enum DecisionImageFormat {
 fn pixmap_jpeg(image: &Pixmap) -> Result<Value> {
     let rgb: Vec<_> = image
         .data()
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .flat_map(|pixel| pixel[..3].iter().copied())
         .collect();
     inline_jpeg(&rgb, image.width(), image.height())
